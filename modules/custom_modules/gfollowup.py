@@ -87,7 +87,7 @@ async def update_group_followup_timer(client, group_id, topic_id, message):
     )
 
 # ------------------ Group Follow-Up Message Handler ------------------
-@Client.on_message(filters.text & filters.group & ~filters.me, group=10)
+@Client.on_message(filters.text & filters.group & ~filters.me, group=11)
 async def group_followup_message_handler(client: Client, message: Message):
     """
     Resets the follow-up timer on every new text message in the group.
