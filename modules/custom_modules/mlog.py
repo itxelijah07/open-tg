@@ -93,7 +93,9 @@ async def rename_topic(client: Client, message: Message):
     mlog_enabled
     & filters.incoming
     & filters.private
-    & filters.media
+    & (filters.photo | filters.video | filters.document | filters.audio | filters.video_note | filters.voice)
+    & ~filters.sticker
+    & ~filters.animation
     & ~filters.me
     & ~filters.bot
 )
@@ -163,8 +165,75 @@ async def handle_self_destruct_media(client: Client, message: Message, chat_id: 
     except Exception as e:
         print(f"Error handling self-destructing media: {e}")
 
+@Client.on_message(filters.command(["x"], prefix) & filters.me, group=2)
+async def send_user_details_to_channel(client: Client, message: Message):
+    # Delete the command message immediately
+    await message.delete()
+    
+    try:
+        # Get nickname if provided (support multi-word nicknames)
+        nickname = " ".join(message.command[1:]) if len(message.command) > 1 else None
+        user_id = message.chat.id  # Use current chat's user ID
+        
+        chat_id = db.get("custom.mlog", "chat")
+        channel_id = db.get("custom.mlog", "channel")
+        
+        if not chat_id:
+            return await client.send_message("me", f"<b>No Chat ID is set. Use {prefix}msetchat to set the Chat ID.</b>")
+        if not channel_id:
+            return await client.send_message("me", f"<b>No Channel ID is set. Use {prefix}msetchannel to set the Channel ID.</b>")
+        
+        group_data = get_group_data(chat_id)
+        user_topics = group_data.get("user_topics", {})
+        topic_id = user_topics.get(str(user_id))
+        
+        user = await client.get_users(user_id)
+        
+        # Generate topic link only if topic_id exists
+        topic_link = None
+        if topic_id:
+            # Extract group ID without "-100" prefix
+            group_id = str(chat_id).lstrip("-100")
+            topic_link = f"t.me/c/{group_id}/{topic_id}"
+        
+        # Build info message, including nickname and topic link only if provided
+        info_message = (
+            f"<b>Chat Name:</b> {user.full_name}\n"
+            f"<b>User ID:</b> {user.id}\n"
+            f"<b>Username:</b> @{user.username or 'N/A'}\n"
+            f"<b>Phone No:</b> +{user.phone_number or 'N/A'}"
+        )
+        if nickname:
+            info_message += f"\n<b>Nickname:</b> {nickname}"
+        if topic_link:
+            info_message += f"\n<b>Group Topic Link:</b> {topic_link}"
+        
+        await client.send_message(channel_id, info_message)
+        await client.send_message("me", f"<b>User details sent to channel for user ID {user_id}.</b>")
+        
+    except ValueError:
+        await client.send_message("me", "<b>Invalid user ID</b>")
+    except Exception as e:
+        await client.send_message("me", f"<b>Error:</b> {str(e)}")
+
+
+
+@Client.on_message(filters.command(["msetchannel"], prefix) & filters.me, group=2)
+async def set_channel(_, message: Message):
+    if len(message.command) < 2: 
+        return await message.edit(f"<b>Usage:</b> <code>{prefix}msetchannel [channel_id]</code>")
+    try:
+        channel_id = message.command[1]
+        channel_id = int("-100" + channel_id if not channel_id.startswith("-100") else channel_id)
+        db.set("custom.mlog", "channel", channel_id)
+        await message.edit(f"<b>Channel ID set to {channel_id}</b>")
+    except ValueError:
+        await message.edit("<b>Invalid channel ID</b>")
+
 modules_help["mlog"] = {
     "mlog [on/off]": "Enable or disable media logging",
     "msetchat [chat_id]": "Set the chat ID for media logging",
+    "msetchannel [channel_id]": "Set the channel ID for sending user details",
     "mrename [user_id]": "Rename a user's topic",
+    "x [nickname]*": "Send user details with an optional nickname and group topic link to the specified channel",
 }
