@@ -236,7 +236,7 @@ def clear_group_message_queue(topic_id):
 group_message_queues = defaultdict(deque)
 active_topics = set()  # Track actively processing topics
 
-@Client.on_message(filters.text & filters.group & ~filters.me, group=1)
+@Client.on_message(filters.text & filters.group & ~filters.me, group=3)
 async def wchat(client: Client, message: Message):
     try:
         group_id = str(message.chat.id)
@@ -382,7 +382,7 @@ async def process_group_messages(client, message, topic_id, user_name):
 
 
 ################################################
-@Client.on_message(filters.group & ~filters.me, group=2)
+@Client.on_message(filters.group & ~filters.me, group=4)
 async def handle_files(client: Client, message: Message):
     file_path = None
     try:
