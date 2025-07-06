@@ -25,7 +25,7 @@ def get_group_data(group_id):
 def update_group_data(group_id, data):
     db.set(f"custom.mlog", str(group_id), data)
 
-@Client.on_message(filters.command(["mlog"], prefix) & filters.me, group=2)
+@Client.on_message(filters.command(["mlog"], prefix) & filters.me, group=5)
 async def mlog(_, message: Message):
     if len(message.command) < 2 or message.command[1].lower() not in ["on", "off"]:
         return await message.edit(f"<b>Usage:</b> <code>{prefix}mlog [on/off]</code>")
@@ -33,7 +33,7 @@ async def mlog(_, message: Message):
     db.set("custom.mlog", "status", status)
     await message.edit(f"<b>Media logging is now {'enabled' if status else 'disabled'}</b>")
 
-@Client.on_message(filters.command(["msetchat"], prefix) & filters.me, group=2)
+@Client.on_message(filters.command(["msetchat"], prefix) & filters.me, group=5)
 async def set_chat(_, message: Message):
     if len(message.command) < 2:
         return await message.edit(f"<b>Usage:</b> <code>{prefix}msetchat [chat_id]</code>")
@@ -45,7 +45,7 @@ async def set_chat(_, message: Message):
     except ValueError:
         await message.edit("<b>Invalid chat ID</b>")
 
-@Client.on_message(filters.command(["mrename", "m"], prefix) & filters.me, group=2)
+@Client.on_message(filters.command(["mrename", "m"], prefix) & filters.me, group=5)
 async def rename_topic(client: Client, message: Message):
     try:
         user_id = int(message.command[1]) if len(message.command) > 1 else message.chat.id
