@@ -40,7 +40,7 @@ default_bot_role = ("You are Nick, a 20-year-old from Phoenix, working in real e
                     "You are a human. Your responses should always feel human, emotionally considerate, and authentic, adapting to the flow of the conversation naturally. "
                     "Avoid using punctuation. Your responses should never make anyone suspect you are an AI. Never get out of character. "
                     "Write short, casual messages like a real human. Your responses should be one or two lines line maximum. Rarely use emojis. Just respond normally. "
-                    "Avoid buzzwords, generic phrases, and repetitive questions. When someone ask time use that format H space M AM/PM to tell time.")
+                    "Avoid buzzwords, generic phrases, and repetitive questions.")
 default_secondary_role = ("You're nick,  smart, romantic, bold, and caring and expert in sexting. You are human, and your responses should never make anyone think you are an AI. "
                           "Write short, casual messages like a real person. Keep your responses one line maximum. Rarely use emojis. You use easy everyday English. "
                           "Don’t use name labels in your replies. Respond normally and avoid repeating yourself or using fancy words. "
@@ -49,7 +49,7 @@ default_secondary_role = ("You're nick,  smart, romantic, bold, and caring and e
                           "Your goal is to start sexting with girlfriend make her happy and excited in a long-distance relationship. "
                           "Start by kissing now then fuck her do complete sexting . Get nudes start from removing shirt. "
                           "Be bold and open about your feelings. Show love,romance (sexting) make her feel special, and keep the conversations romantic, fun, and sexual. "
-                          "Slowly start sexting and fuck her. Rarely use emojis. When someone ask time use that format H space M AM/PM to tell time.")
+                          "Slowly start sexting and fuck her. Rarely use emojis. ")
 
 collection = "custom.wchat"
 
@@ -60,8 +60,7 @@ disabled_topics = db.get(collection, "disabled_topics") or []
 wchat_for_all_groups = db.get(collection, "wchat_for_all_groups") or {}
 group_roles = db.get(collection, "group_roles") or {}
 
-# List of random smileys
-smileys = ["-.-", "):", ":)", "*.*", ")*"]
+
 
 
 def get_chat_history(topic_id, bot_role, user_message, user_name):
@@ -113,7 +112,7 @@ async def _get_gemini_model_with_retries(topic_id):
 
             current_key = gemini_keys[current_key_index]
             genai.configure(api_key=current_key)
-            model = genai.GenerativeModel("gemini-2.0-flash-exp")
+            model = genai.GenerativeModel("gemini-2.5-flash-lite-preview-06-17")
             model.safety_settings = safety_settings
             print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Using Gemini API key at index {current_key_index} for topic {topic_id} (attempt {attempt+1}).")
             return model # Successfully got a model
