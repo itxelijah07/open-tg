@@ -65,7 +65,7 @@ async def _get_gemini_model_with_retries():
     try:
         genai.configure(api_key=current_key)
         # Use "gemini-2.0-flash-exp" as it's used in process_messages
-        model_instance = genai.GenerativeModel("gemini-2.0-flash-exp")
+        model_instance = genai.GenerativeModel("gemini-2.5-flash-lite-preview-06-17")
         model_instance.safety_settings = safety_settings
         return model_instance
     except Exception as e:
