@@ -717,277 +717,123 @@ async def wchat_command(client: Client, message: Message):
 async def set_custom_role(client: Client, message: Message):
     try:
         parts = message.text.strip().split()
+        group_id = str(message.chat.id)
+        thread_id_str = str(message.message_thread_id or 0)
+        topic_id = f"{group_id}:{thread_id_str}"
 
-        # Determine if it's a topic context based on where the command was issued.
-        is_topic_context = message.chat.type == ChatType.SUPERGROUP and message.message_thread_id is not None
-
-        if len(parts) < 2 and not is_topic_context:
+        if len(parts) < 2:
             await message.edit_text(
-                f"Usage: {prefix}grole [group|topic] <custom role>\n"
-                f"Or for a specific topic: {prefix}grole topic <thread_id> <custom role>"
+                f"Usage:\n"
+                f"{prefix}grole [group|topic] <role text>\n"
+                f"{prefix}grole <role text> (auto applies to current topic or group)"
             )
             return
-        elif len(parts) < 2 and is_topic_context:
-            # If in a topic and no role is provided, default to topic scope for reset/toggle
-            scope = "topic"
-            custom_role_text_parts = []
-        elif parts[1].lower() in ["group", "topic"]:
-            scope = parts[1].lower()
-            custom_role_text_parts = parts[2:]
-        else:
-            # Assume it's a custom role for the current topic if not 'group' or 'topic'
-            scope = "topic" if is_topic_context else "group" # Default to group if not in a topic
-            custom_role_text_parts = parts[1:]
 
-        group_id = str(message.chat.id)
+        if parts[1].lower() in ["group", "topic"]:
+            scope = parts[1].lower()
+            role_text = " ".join(parts[2:]).strip()
+        else:
+            # Auto-determine scope based on whether this is a topic
+            scope = "topic" if message.message_thread_id else "group"
+            role_text = " ".join(parts[1:]).strip()
 
         if scope == "group":
-            custom_role = " ".join(custom_role_text_parts).strip()
-            if not custom_role:
+            if not role_text:
                 group_roles.pop(group_id, None)
                 db.set(collection, "group_roles", group_roles)
-                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Group role reset to default for group {group_id}.")
-                await message.edit_text(f"Role reset to default for group {group_id}.")
+                await message.edit_text(f"🔄 Group role reset to default.")
             else:
-                group_roles[group_id] = custom_role
+                group_roles[group_id] = role_text
                 db.set(collection, "group_roles", group_roles)
-                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Group role set for {group_id}: {custom_role[:50]}...")
-                await message.edit_text(
-                    f"Role set successfully for group {group_id}!\n<b>New Role:</b> {custom_role}"
-                )
+                await message.edit_text(f"✅ Group role set:\n<code>{role_text}</code>")
 
         elif scope == "topic":
-            thread_id_str = str(message.message_thread_id or 0) # Use current thread ID
-            # If the command included a specific thread ID (e.g., /grole topic 123456 custom role)
-            # This part needs careful adjustment as "topic" is now often implicit.
-            # We'll assume if the 2nd part is a digit, it's a thread_id
-            if len(parts) > 2 and parts[1].isdigit():
-                thread_id_str = parts[1]
-                custom_role = " ".join(parts[2:]).strip()
-            else:
-                custom_role = " ".join(custom_role_text_parts).strip()
-
-
-            topic_id = f"{group_id}:{thread_id_str}"
-
-            if not custom_role:
+            if not role_text:
                 group_role = group_roles.get(group_id, default_bot_role)
                 db.set(collection, f"custom_roles.{topic_id}", group_role)
                 db.set(collection, f"custom_roles_primary.{topic_id}", None)
                 db.set(collection, f"chat_history.{topic_id}", None)
-                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Topic role reset to group's role for {topic_id}.")
-                await message.edit_text(
-                    f"Role reset to group's role for topic {topic_id}."
-                )
+                await message.edit_text(f"🔄 Topic role reset to group role.")
             else:
-                db.set(collection, f"custom_roles.{topic_id}", custom_role)
-                db.set(collection, f"custom_roles_primary.{topic_id}", custom_role)
+                db.set(collection, f"custom_roles.{topic_id}", role_text)
+                db.set(collection, f"custom_roles_primary.{topic_id}", role_text)
                 db.set(collection, f"chat_history.{topic_id}", None)
-                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Topic role set for {topic_id}: {custom_role[:50]}...")
-                await message.edit_text(
-                    f"Role set successfully for topic {topic_id}!\n<b>New Role:</b> {custom_role}"
-                )
-        else:
-            await message.edit_text(f"Invalid scope. Use 'group' or 'topic'.")
+                await message.edit_text(f"✅ Topic role set:\n<code>{role_text}</code>")
 
         await asyncio.sleep(1)
         await message.delete()
     except Exception as e:
-        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in the `grole` command:\n\n{str(e)}")
-        await client.send_message(
-            "me", f"An error occurred in the `grole` command:\n\n{str(e)}"
-        )
+        await client.send_message("me", f"❌ Error in grole:\n{e}")
 
----
 
 @Client.on_message(filters.command("grolex", prefix) & filters.group & filters.me)
-async def toggle_or_reset_secondary_role(client: Client, message: Message):
+async def toggle_secondary_role(client: Client, message: Message):
     try:
         parts = message.text.strip().split()
+        group_id = str(message.chat.id)
+        thread_id_str = str(message.message_thread_id or 0)
+        topic_id = f"{group_id}:{thread_id_str}"
+        in_topic = message.message_thread_id is not None
 
-        # Determine if it's a topic context based on where the command was issued.
-        is_topic_context = message.chat.type == ChatType.SUPERGROUP and message.message_thread_id is not None
+        scope = "topic" if in_topic else "group"
+        custom_text = " ".join(parts[1:]).strip().lower() if len(parts) > 1 else ""
 
-        # Adjust usage message based on context
-        if not is_topic_context:
-            if len(parts) < 2:
-                await message.edit_text(
-                    f"Usage:\n"
-                    f"{prefix}grolex group [<custom secondary role>|r]\n"
-                    f"{prefix}grolex topic [thread_id] [<custom secondary role>|r]\n\n"
-                    f"Examples:\n"
-                    f"  {prefix}grolex group           → Toggle secondary role for the group\n"
-                    f"  {prefix}grolex group r         → Reset secondary role for the group\n"
-                    f"  {prefix}grolex group I am a helper → Set custom secondary role for the group\n"
-                    f"  {prefix}grolex topic 123456      → Toggle secondary role for topic 123456\n"
-                    f"  {prefix}grolex topic 123456 r    → Reset secondary role for topic 123456\n"
-                    f"  {prefix}grolex topic 123456 I am a topic helper → Set custom secondary role for topic 123456"
-                )
-                return
-        else: # In a topic context
-            if len(parts) < 2:
-                # If only /grolex is sent in a topic, it means toggle for current topic
-                pass # Proceed to handle as topic toggle
-            elif len(parts) == 2 and parts[1].lower() in ["group", "topic"]:
-                # If explicitly specified 'group' or 'topic'
-                pass
-            elif len(parts) >= 2 and not parts[1].isdigit() and parts[1].lower() not in ["group", "topic"]:
-                # If the second part is not 'group', 'topic', or a thread_id, assume it's the custom role for current topic
-                pass # This is the case like '/grolex I am a helper' in a topic
+        target_id = topic_id if scope == "topic" else group_id
+
+        if custom_text == "r":
+            db.set(collection, f"custom_secondary_roles.{target_id}", None)
+            if scope == "group":
+                db.set(collection, f"chat_history.{target_id}", None)
             else:
-                # Other invalid usages, show full help.
-                if len(parts) < 2: # This covers cases where it's just /grolex in a topic
-                    pass
-                else: # Any other invalid usage, show the full usage.
-                    await message.edit_text(
-                        f"Usage:\n"
-                        f"{prefix}grolex [<custom secondary role>|r] (for current topic)\n"
-                        f"{prefix}grolex group [<custom secondary role>|r]\n"
-                        f"{prefix}grolex topic [thread_id] [<custom secondary role>|r]\n\n"
-                        f"Examples (in a topic):\n"
-                        f"  {prefix}grolex           → Toggle secondary role for the current topic\n"
-                        f"  {prefix}grolex r         → Reset secondary role for the current topic\n"
-                        f"  {prefix}grolex I am a helper → Set custom secondary role for the current topic"
-                    )
-                    return
-
-
-        scope = ""
-        custom_secondary_text_parts = []
-        thread_id_str = str(message.message_thread_id or 0) # Default to current thread ID
-
-        # Determine scope and parse arguments
-        if is_topic_context and (len(parts) == 1 or (len(parts) > 1 and parts[1].lower() not in ["group", "topic", "r"])):
-            # If in a topic and no explicit scope or it's a direct role
-            scope = "topic"
-            custom_secondary_text_parts = parts[1:]
-        elif len(parts) > 1 and parts[1].lower() == "group":
-            scope = "group"
-            custom_secondary_text_parts = parts[2:]
-        elif len(parts) > 1 and parts[1].lower() == "topic":
-            scope = "topic"
-            if len(parts) > 2 and parts[2].isdigit():
-                thread_id_str = parts[2]
-                custom_secondary_text_parts = parts[3:]
-            else:
-                custom_secondary_text_parts = parts[2:]
-        else:
-            await message.edit_text("Invalid usage. Please check the examples.")
+                db.set(collection, f"chat_history.{topic_id}", None)
+            await message.edit_text(f"🔁 Secondary role reset to default for {scope}.")
+            await asyncio.sleep(1)
+            await message.delete()
             return
 
+        if custom_text:
+            db.set(collection, f"custom_secondary_roles.{target_id}", custom_text)
+            await message.edit_text(f"✅ Custom secondary role set for {scope}:\n<code>{custom_text}</code>")
+            await asyncio.sleep(1)
+            await message.delete()
+            return
 
-        group_id = str(message.chat.id)
-
-        if scope == "group":
-            if not custom_secondary_text_parts:
-                primary_role = group_roles.get(group_id, default_bot_role)
-                custom_secondary = db.get(collection, f"custom_secondary_roles.{group_id}")
-                secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
-                current_role = group_roles.get(group_id, primary_role)
-                if current_role == primary_role:
-                    group_roles[group_id] = secondary_role
-                    response = f"<b>Secondary Role Activated</b> for group {group_id}:\n{secondary_role}"
-                    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Group secondary role activated for {group_id}.")
-                else:
-                    group_roles[group_id] = primary_role
-                    response = f"<b>Switched back to Primary Role</b> for group {group_id}:\n{primary_role}"
-                    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Group primary role reactivated for {group_id}.")
-                db.set(collection, "group_roles", group_roles)
-                db.set(collection, f"chat_history.{group_id}", None)
-                await message.edit_text(response)
-                await asyncio.sleep(1)
-                await message.delete()
-            else:
-                if custom_secondary_text_parts[0].lower() == "r":
-                    db.set(collection, f"custom_secondary_roles.{group_id}", None)
-                    primary_role = group_roles.get(group_id, default_bot_role)
-                    current_role = group_roles.get(group_id, primary_role)
-                    if current_role != primary_role:
-                        group_roles[group_id] = primary_role
-                        db.set(collection, "group_roles", group_roles)
-                    db.set(collection, f"chat_history.{group_id}", None)
-                    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Group secondary role reset to default for {group_id}.")
-                    await message.edit_text(
-                        f"Secondary role reset to default for group {group_id}.\nNew Secondary Role:\n{default_secondary_role}"
-                    )
-                    await asyncio.sleep(1)
-                    await message.delete()
-                else:
-                    custom_secondary_text = " ".join(custom_secondary_text_parts).strip()
-                    if custom_secondary_text:
-                        db.set(collection, f"custom_secondary_roles.{group_id}", custom_secondary_text)
-                        primary_role = group_roles.get(group_id, default_bot_role)
-                        current_role = group_roles.get(collection, f"custom_roles.{group_id}") or primary_role # Check the actual active role
-                        if current_role != primary_role: # Only update if secondary was active
-                            group_roles[group_id] = custom_secondary_text
-                            db.set(collection, "group_roles", group_roles)
-                        db.set(collection, f"chat_history.{group_id}", None)
-                        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Custom group secondary role set for {group_id}: {custom_secondary_text[:50]}...")
-                        await message.edit_text(
-                            f"Custom secondary role set for group {group_id}!\n<b>New Secondary Role:</b> {custom_secondary_text}"
-                        )
-                        await asyncio.sleep(1)
-                        await message.delete()
-
-        elif scope == "topic":
-            topic_id = f"{group_id}:{thread_id_str}"
-            primary_role = db.get(collection, f"custom_roles_primary.{topic_id}")
-            if primary_role is None:
-                primary_role = group_roles.get(group_id, default_bot_role)
-                db.set(collection, f"custom_roles_primary.{topic_id}", primary_role)
-
-            if not custom_secondary_text_parts:
-                current_role = db.get(collection, f"custom_roles.{topic_id}") or primary_role
-                custom_secondary = db.get(collection, f"custom_secondary_roles.{topic_id}")
-                secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
-                if current_role == primary_role:
-                    db.set(collection, f"custom_roles.{topic_id}", secondary_role)
-                    response = f"<b>Secondary Role Activated</b> for topic {topic_id}:\n{secondary_role}"
-                    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Topic secondary role activated for {topic_id}.")
-                else:
-                    db.set(collection, f"custom_roles.{topic_id}", primary_role)
-                    response = f"<b>Switched back to Primary Role</b> for topic {topic_id}:\n{primary_role}"
-                    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Topic primary role reactivated for {topic_id}.")
-                db.set(collection, f"chat_history.{topic_id}", None)
-                await message.edit_text(response)
-                await asyncio.sleep(1)
-                await message.delete()
-            else:
-                if custom_secondary_text_parts[0].lower() == "r":
-                    db.set(collection, f"custom_secondary_roles.{topic_id}", None)
-                    current_role = db.get(collection, f"custom_roles.{topic_id}") or primary_role
-                    if current_role != primary_role:
-                        db.set(collection, f"custom_roles.{topic_id}", primary_role)
-                    db.set(collection, f"chat_history.{topic_id}", None)
-                    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Topic secondary role reset to default for {topic_id}.")
-                    await message.edit_text(
-                        f"Secondary role reset to default for topic {topic_id}.\nNew Secondary Role:\n{default_secondary_role}"
-                    )
-                    await asyncio.sleep(1)
-                    await message.delete()
-                else:
-                    custom_secondary_text = " ".join(custom_secondary_text_parts).strip()
-                    if custom_secondary_text:
-                        db.set(collection, f"custom_secondary_roles.{topic_id}", custom_secondary_text)
-                        current_role = db.get(collection, f"custom_roles.{topic_id}") or primary_role
-                        if current_role != primary_role: # Only update if secondary was active
-                            db.set(collection, f"custom_roles.{topic_id}", custom_secondary_text)
-                        db.set(collection, f"chat_history.{topic_id}", None)
-                        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Custom topic secondary role set for {topic_id}: {custom_secondary_text[:50]}...")
-                        await message.edit_text(
-                            f"Custom secondary role set for topic {topic_id}!\n<b>New Secondary Role:</b> {custom_secondary_text}"
-                        )
-                        await asyncio.sleep(1)
-                        await message.delete()
-        else:
-            await message.edit_text("Invalid scope. Use 'group' or 'topic'.")
-
-    except Exception as e:
-        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in the `grolex` command:\n\n{str(e)}")
-        await client.send_message(
-            "me", f"An error occurred in the `grolex` command:\n\n{str(e)}"
+        # Toggle secondary role
+        primary = (
+            group_roles.get(group_id)
+            if scope == "group"
+            else db.get(collection, f"custom_roles_primary.{topic_id}") or group_roles.get(group_id) or default_bot_role
         )
-        
+        current = (
+            group_roles.get(group_id)
+            if scope == "group"
+            else db.get(collection, f"custom_roles.{topic_id}") or primary
+        )
+        secondary = db.get(collection, f"custom_secondary_roles.{target_id}") or default_secondary_role
+
+        if current == primary:
+            if scope == "group":
+                group_roles[group_id] = secondary
+                db.set(collection, "group_roles", group_roles)
+            else:
+                db.set(collection, f"custom_roles.{topic_id}", secondary)
+            response = f"🟢 Secondary role activated:\n<code>{secondary}</code>"
+        else:
+            if scope == "group":
+                group_roles[group_id] = primary
+                db.set(collection, "group_roles", group_roles)
+            else:
+                db.set(collection, f"custom_roles.{topic_id}", primary)
+            response = f"🔵 Switched back to primary role:\n<code>{primary}</code>"
+
+        db.set(collection, f"chat_history.{target_id}", None)
+        await message.edit_text(response)
+        await asyncio.sleep(1)
+        await message.delete()
+    except Exception as e:
+        await client.send_message("me", f"❌ Error in grolex:\n{e}")
+
+
 @Client.on_message(filters.command("setwkey", prefix) & filters.me)
 async def set_gemini_key(client: Client, message: Message):
     try:
