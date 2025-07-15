@@ -11,7 +11,12 @@ DEFAULT_PARAMS = {
     "voice_id": "QLDNM6o3lDbtfJLUO890",
     "stability": 0.3,
     "similarity_boost": 0.9,
+    "style": 0.5,
+    "use_speaker_boost": True,
+    "speed": 1.0,
+    "model_id": "eleven_multilingual_v2",  # you can try eleven_v3, eleven_turbo_v2.5, etc.
 }
+
 
 def process_audio(input_path: str, output_path: str, speed: float, volume: float):
     """
@@ -36,19 +41,14 @@ def process_audio(input_path: str, output_path: str, speed: float, volume: float
     )
 
 async def generate_elevenlabs_audio(text: str):
-    """
-    Generate audio using ElevenLabs API with adjusted parameters.
-    :param text: Text to convert to speech.
-    :return: Path to the generated audio file.
-    """
     api_keys = db.get("custom.elevenlabs", "api_keys", [])
     current_key_index = db.get("custom.elevenlabs", "current_key_index", 0)
-    
+
     if not api_keys:
-        raise ValueError(f"No API keys configured! Use {prefix}set_el add_key <key>")
+        raise ValueError(f"No API keys configured! Use {prefix}set_el add <key>")
 
     params = {key: db.get("custom.elevenlabs", key, DEFAULT_PARAMS[key]) for key in DEFAULT_PARAMS}
-    
+
     for attempt in range(len(api_keys)):
         api_key = api_keys[current_key_index]
         headers = {
@@ -57,14 +57,18 @@ async def generate_elevenlabs_audio(text: str):
         }
         data = {
             "text": text,
+            "model_id": params["model_id"],
             "voice_settings": {
                 "stability": params["stability"],
                 "similarity_boost": params["similarity_boost"],
+                "style": params.get("style", 0.5),
+                "use_speaker_boost": params.get("use_speaker_boost", True)
             },
+            "speed": params.get("speed", 1.0)
         }
 
         voice_id = params["voice_id"]
-        original_audio_path = "elevenlabs_voice.mp3" # ElevenLabs typically returns MP3
+        original_audio_path = "elevenlabs_voice.mp3"
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -78,17 +82,17 @@ async def generate_elevenlabs_audio(text: str):
                     with open(original_audio_path, "wb") as f:
                         f.write(response.content)
                     return original_audio_path
-                
+
                 error_data = response.json()
                 error_status = error_data.get("detail", {}).get("status", "")
-                
+
                 if error_status in ["quota_exceeded", "invalid_api_key", "too_many_concurrent_requests"]:
                     current_key_index = (current_key_index + 1) % len(api_keys)
                     db.set("custom.elevenlabs", "current_key_index", current_key_index)
                 else:
                     raise ValueError(f"API Error: {error_data.get('detail', {}).get('message', 'Unknown error')}")
 
-        except Exception as e:
+        except Exception:
             current_key_index = (current_key_index + 1) % len(api_keys)
             db.set("custom.elevenlabs", "current_key_index", current_key_index)
 
