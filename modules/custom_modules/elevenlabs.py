@@ -1,4 +1,3 @@
-
 import os
 import httpx
 import subprocess
@@ -6,6 +5,34 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 from utils.misc import modules_help, prefix
 from utils.db import db
+import google.generativeai as genai
+
+genai.configure(api_key="YOUR_GEMINI_API_KEY")  # Replace with your key
+gemini_model = genai.GenerativeModel("gemini-pro")
+
+async def rewrite_text_with_gemini(text: str, forced_tone: str = None) -> str:
+    if forced_tone:
+        prompt = (
+            f"You are a seductive, flirty text rewriter. Rewrite the following message in a sensual, emotionally charged tone. "
+            f"Use natural American English, smooth phrasing, and make it sound {forced_tone}. Add punctuation and contractions.\n\n"
+            f"Original: {text}\n\nRewritten:"
+        )
+    else:
+        prompt = (
+            "You are a text-to-speech rewriter that enhances natural speech tone.\n"
+            "Auto-detect the message's tone (e.g., casual, romantic, flirty, funny, formal, seductive).\n"
+            "Rewrite the message to sound fluent and expressive in spoken American English.\n"
+            "Fix grammar, punctuation, and rhythm without changing meaning.\n\n"
+            f"Original: {text}\n\nRewritten:"
+        )
+
+    try:
+        response = gemini_model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"[Gemini Rewrite Error] {e}")
+        return text
+
 
 DEFAULT_PARAMS = {
     "voice_id": "QLDNM6o3lDbtfJLUO890",
@@ -117,7 +144,17 @@ async def elevenlabs_command(client: Client, message: Message):
             )
             return
 
-        text = " ".join(message.command[1:]).strip()
+        raw_text = " ".join(message.command[1:]).strip()
+        # Allow user to force seductive tone with --seduce or --horny
+      forced_tone = None
+      for keyword in ["--horny", "--seduce", "--seductive", "--sensual"]:
+      if keyword in raw_text.lower():
+         forced_tone = "seductive"
+        raw_text = raw_text.replace(keyword, "").strip()
+
+     text = await rewrite_text_with_gemini(raw_text, forced_tone=forced_tone)
+
+
         await message.delete()
 
         original_audio_path = await generate_elevenlabs_audio(text)
