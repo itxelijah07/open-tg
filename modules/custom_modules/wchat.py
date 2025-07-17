@@ -792,68 +792,41 @@ async def set_gemini_key(client: Client, message: Message):
 async def set_wmodel(client: Client, message: Message):
     try:
         parts = message.text.strip().split()
-        primary_model = db.get(collection, "primary_gemini_model") or PRIMARY_GEMINI_MODEL
-        secondary_model = db.get(collection, "secondary_gemini_model") or SECONDARY_GEMINI_MODEL
-
         if len(parts) < 2:
             await message.edit_text(
-                f"<b>Current Models:</b>\n"
-                f"Primary Model: {primary_model}\n"
-                f"Secondary Model: {secondary_model}\n\n"
-                f"<b>Usage:</b>\n"
-                f"{prefix}setwmodel primary <model_name>\n"
-                f"{prefix}setwmodel secondary <model_name>\n"
-                f"{prefix}setwmodel show\n"
-                f"Example: {prefix}setwmodel primary gemini-2.0-flash"
+                f"<b>Usage:</b> {prefix}setwmodel `default <model_name>` | `secondary <model_name>` | `show`"
             )
-            await asyncio.sleep(1)
-            await message.delete()
             return
 
         subcommand = parts[1].lower()
         if subcommand == "show":
             await message.edit_text(
-                f"<b>Current Gemini Models (WChat):</b>\n"
-                f"Primary Model: <code>{primary_model}</code>\n"
-                f"Secondary Model: <code>{secondary_model}</code>"
+                f"<b>Current Gemini Models:</b>\n"
+                f"Default Model: <code>{default_gmodel_name}</code>\n"
+                f"Secondary Model: <code>{secondary_gmodel_name}</code>"
             )
-            await asyncio.sleep(1)
-            await message.delete()
             return
 
         if len(parts) < 3:
             await message.edit_text(f"Please provide a model name for {subcommand}.")
-            await asyncio.sleep(1)
-            await message.delete()
             return
 
         model_name = parts[2].strip()
-        valid_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
-        if model_name not in valid_models:
-            await message.edit_text(
-                f"Invalid model name: {model_name}. Available models: {', '.join(valid_models)}"
-            )
-            await asyncio.sleep(1)
-            await message.delete()
-            return
-
-        if subcommand == "primary":
-            db.set(collection, "primary_gemini_model", model_name)
-            await message.edit_text(f"Primary Gemini model set to {model_name}.")
+        if subcommand == "default":
+            db.set(collection, "default_gmodel_name", model_name)
+            await message.edit_text(f"Default model set to <code>{model_name}</code>.")
         elif subcommand == "secondary":
-            db.set(collection, "secondary_gemini_model", model_name)
-            await message.edit_text(f"Secondary Gemini model set to {model_name}.")
+            db.set(collection, "secondary_gmodel_name", model_name)
+            await message.edit_text(f"Secondary model set to <code>{model_name}</code>.")
         else:
             await message.edit_text(
-                f"Invalid subcommand. Use 'primary', 'secondary', or 'show'.\n"
-                f"Example: {prefix}setwmodel primary gemini-2.0-flash"
+                f"Invalid subcommand. Use 'default', 'secondary', or 'show'.\n"
+                f"Example: {prefix}setwmodel default gemini-2.0-flash"
             )
 
     except Exception as e:
-        await client.send_message(
-            "me", f"❌ Error in `setwmodel` command:\n\n{str(e)}"
-        )
-
+        await client.send_message("me", f"❌ Error in `setwmodel` command:\n\n{str(e)}")
+        
 @Client.on_message(filters.command("wstatus", prefix) & filters.me)
 async def wstatus(client: Client, message: Message):
     try:
