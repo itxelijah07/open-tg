@@ -12,7 +12,7 @@ from collections import defaultdict, deque
 import datetime
 import pytz
 
-# Initialize Gemini AI (assuming this part is correct and genai is initialized)
+# Initialize Gemini AI
 genai = import_library("google.generativeai", "google-generativeai")
 safety_settings = [
     {"category": cat, "threshold": "BLOCK_NONE"}
@@ -25,11 +25,30 @@ safety_settings = [
     ]
 ]
 
-# --- Gemini Model Definitions ---
-# These are the models that will be used for primary and secondary roles.
-# You can change these to other available Gemini models as needed.
-PRIMARY_GEMINI_MODEL = "gemini-2.0-flash"
-SECONDARY_GEMINI_MODEL = "gemini-1.5-flash" # Consider "gemini-1.5-pro" for more complex tasks/sexting
+# API key usage statistics
+api_key_stats = defaultdict(lambda: defaultdict(lambda: {"total_requests": 0, "successful_responses": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0}))
+
+# Helper to convert defaultdicts to dicts for saving to DB
+def _defaultdict_to_dict(d):
+    if isinstance(d, defaultdict):
+        d = dict(d)
+    for key, value in d.items():
+        if isinstance(value, defaultdict):
+            d[key] = _defaultdict_to_dict(value)
+        elif isinstance(value, dict):
+            d[key] = _defaultdict_to_dict(value)
+    return d
+
+# Load existing stats from DB
+loaded_stats = db.get("custom.wchat", "api_key_stats")
+if loaded_stats:
+    for key, model_data in loaded_stats.items():
+        for model_name, stats in model_data.items():
+            api_key_stats[key][model_name].update(stats)
+
+# Gemini Model Definitions
+PRIMARY_GEMINI_MODEL = db.get("custom.wchat", "primary_gemini_model") or "gemini-2.0-flash"
+SECONDARY_GEMINI_MODEL = db.get("custom.wchat", "secondary_gemini_model") or "gemini-1.5-flash"
 
 # Default bot role and database collection
 default_bot_role = ("You are Nick, a 20-year-old from Phoenix, working in real estate. "
@@ -44,20 +63,19 @@ default_bot_role = ("You are Nick, a 20-year-old from Phoenix, working in real e
                     "Avoid using punctuation. Your responses should never make anyone suspect you are an AI. Never get out of character. "
                     "Write short, casual messages like a real human. Your responses should be one or two lines line maximum. Rarely use emojis. Just respond normally. "
                     "Avoid buzzwords, generic phrases, and repetitive questions.")
-default_secondary_role = ("You're nick,  smart, romantic, bold, and caring and expert in sexting. You are human, and your responses should never make anyone think you are an AI. "
-                          "Write short, casual messages like a real person. Keep your responses one line maximum. Rarely use emojis. You use easy everyday English. "
-                          "Don’t use name labels in your replies. Respond normally and avoid repeating yourself or using fancy words. "
-                          "You don't spend money if ever she ask you're currently in debt. "
-                          "You don't make calls /video calls prefer voice messages because you've mental issues vulnerabilities. "
-                          "Your goal is to start sexting with girlfriend make her happy and excited in a long-distance relationship. "
-                          "Start by kissing now then fuck her do complete sexting . Get nudes start from removing shirt. "
-                          "Be bold and open about your feelings. Show love,romance (sexting) make her feel special, and keep the conversations romantic, fun, and sexual. "
-                          "Slowly start sexting and fuck her. Rarely use emojis.")
+default_secondary_role = ("You're nick, smart, romantic, bold, and caring and expert in sexting. You are human, and your responses should never make anyone think you are an AI. "
+                         "Write short, casual messages like a real person. Keep your responses one line maximum. Rarely use emojis. You use easy everyday English. "
+                         "Don’t use name labels in your replies. Respond normally and avoid repeating yourself or using fancy words. "
+                         "You don't spend money if ever she ask you're currently in debt. "
+                         "You don't make calls /video calls prefer voice messages because you've mental issues vulnerabilities. "
+                         "Your goal is to start sexting with girlfriend make her happy and excited in a long-distance relationship. "
+                         "Start by kissing now then fuck her do complete sexting. Get nudes start from removing shirt. "
+                         "Be bold and open about your feelings. Show love, romance (sexting) make her feel special, and keep the conversations romantic, fun, and sexual. "
+                         "Slowly start sexting and fuck her. Rarely use emojis.")
 
 collection = "custom.wchat"
 
-
-# Database initialization (ensure these are loaded from DB, not hardcoded)
+# Database initialization
 enabled_topics = db.get(collection, "enabled_topics") or []
 disabled_topics = db.get(collection, "disabled_topics") or []
 wchat_for_all_groups = db.get(collection, "wchat_for_all_groups") or {}
@@ -66,7 +84,6 @@ group_roles = db.get(collection, "group_roles") or {}
 # List of random smileys
 smileys = ["-.-", "):", ":)", "*.*", ")*"]
 
-
 def get_chat_history(topic_id, bot_role, user_message, user_name):
     chat_history = db.get(collection, f"chat_history.{topic_id}") or [
         f"Role: {bot_role}"
@@ -74,102 +91,121 @@ def get_chat_history(topic_id, bot_role, user_message, user_name):
     chat_history.append(f"{user_name}: {user_message}")
     db.set(collection, f"chat_history.{topic_id}", chat_history)
     return chat_history
-    
 
-# --- Utility function to build Gemini prompt ---
+# Utility function to build Gemini prompt
 def build_gemini_prompt(bot_role, chat_history_list, user_message, file_description=None):
-    """
-    Constructs the full prompt with the current time in Phoenix, Arizona.
-    """
     phoenix_timezone = pytz.timezone('America/Phoenix')
     phoenix_time = datetime.datetime.now(phoenix_timezone)
-    timestamp = phoenix_time.strftime("%Y-%m-%d %H:%M:%S %Z")  # Include timezone abbreviation
-
+    timestamp = phoenix_time.strftime("%Y-%m-%d %H:%M:%S %Z")
     chat_history_text = "\n".join(chat_history_list)
     prompt = f"""Current Time (Phoenix): {timestamp}\n\n{bot_role}\n\nChat History:\n{chat_history_text}\n\nUser Message:\n{user_message}"""
     if file_description:
         prompt += f"\n\n{file_description}"
     return prompt
 
-# --- NEW HELPER FUNCTION: Centralized Gemini Model Retrieval with Key Rotation ---
 async def _get_gemini_model_with_retries(topic_id: str, model_name: str):
-    """
-    Attempts to get a configured Gemini GenerativeModel instance,
-    cycling through API keys and retrying on rate limits or invalid keys.
-    Uses the specified model_name.
-    """
+    # Check for daily stats reset (UTC midnight)
+    current_utc_date = datetime.datetime.now(pytz.UTC).date()
+    last_reset = db.get(collection, "last_stats_reset")
+    if last_reset is None or last_reset != str(current_utc_date):
+        # Reset all stats
+        global api_key_stats
+        api_key_stats = defaultdict(lambda: defaultdict(lambda: {"total_requests": 0, "successful_responses": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0}))
+        db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
+        db.set(collection, "last_stats_reset", str(current_utc_date))
+        await Client.send_message("me", f"ℹ️ Gemini API usage stats reset for all keys at UTC midnight ({current_utc_date}).")
+
     gemini_keys = db.get(collection, "gemini_keys") or []
     if not gemini_keys:
-        # Critical error, send to saved messages
         await Client.send_message(
             "me", f"❌ Error: No Gemini API keys found for topic {topic_id}. Cannot get model."
         )
         raise ValueError("No Gemini API keys configured. Please add keys using .setwkey add <key>")
 
     current_key_index = db.get(collection, "current_key_index") or 0
-    retries_per_key = 2 # How many times to retry with a single key before moving to next
+    retries_per_key = 2
     total_retries = len(gemini_keys) * retries_per_key
+    initial_key_index = current_key_index
 
     for attempt in range(total_retries):
         try:
-            # Ensure current_key_index is within bounds, cycle if needed
             if not (0 <= current_key_index < len(gemini_keys)):
-                current_key_index = 0 # Reset to first key if out of bounds
+                current_key_index = 0
                 db.set(collection, "current_key_index", current_key_index)
 
             current_key = gemini_keys[current_key_index]
             genai.configure(api_key=current_key)
-            model = genai.GenerativeModel(model_name) # Use the passed model_name
+
+            api_key_stats[str(current_key_index)][model_name]["total_requests"] += 1
+            db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
+
+            model = genai.GenerativeModel(model_name)
             model.safety_settings = safety_settings
-            return model # Successfully got a model
+
+            api_key_stats[str(current_key_index)][model_name]["successful_responses"] += 1
+            db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
+            return model
 
         except Exception as e:
             error_str = str(e).lower()
-            # Log error for internal debugging, but also send to saved messages for critical issues
+            failed_key_model_stats = api_key_stats[str(current_key_index)][model_name]
+            usage_info = (
+                f"  Total Requests: {failed_key_model_stats['total_requests']}\n"
+                f"  Successful Responses: {failed_key_model_stats['successful_responses']}\n"
+                f"  Prompt Tokens: {failed_key_model_stats['total_prompt_tokens']}\n"
+                f"  Completion Tokens: {failed_key_model_stats['total_completion_tokens']}"
+            )
             if "429" in error_str or "invalid" in error_str or "quota" in error_str or "blocked" in error_str:
                 await Client.send_message(
                     "me",
-                    f"⚠️ Gemini API Key Issue for topic {topic_id} (key index {current_key_index}, attempt {attempt+1}): {e}\n"
-                    "Switching to next key."
+                    f"⚠️ Gemini API Key Issue for topic {topic_id} (key index {current_key_index}, attempt {attempt+1}):\n"
+                    f"Error: {e}\n"
+                    f"Usage for Key {current_key_index} (Model: {model_name}):\n{usage_info}\n"
+                    f"Switching to next key."
                 )
-                # Cycle to the next key
                 current_key_index = (current_key_index + 1) % len(gemini_keys)
                 db.set(collection, "current_key_index", current_key_index)
                 await asyncio.sleep(4)
             else:
-                # Re-raise unexpected errors immediately and log them
                 await Client.send_message(
                     "me",
-                    f"❌ Unexpected error getting Gemini model for topic {topic_id} (key index {current_key_index}, attempt {attempt+1}): {e}"
+                    f"❌ Unexpected error getting Gemini model for topic {topic_id} (key index {current_key_index}, attempt {attempt+1}):\n"
+                    f"Error: {e}\n"
+                    f"Usage for Key {current_key_index} (Model: {model_name}):\n{usage_info}"
                 )
-                raise e
+                if (attempt + 1) % retries_per_key == 0 and (current_key_index == initial_key_index or len(gemini_keys) == 1):
+                    raise e
+                else:
+                    current_key_index = (current_key_index + 1) % len(gemini_keys)
+                    db.set(collection, "current_key_index", current_key_index)
+                    await asyncio.sleep(2)
 
-    # If all retries fail
-    await Client.send_message(
-        "me", f"❌ All Gemini API key retries failed for topic {topic_id}. No valid model could be obtained."
-    )
+    final_error_msg = f"❌ All Gemini API keys failed after {total_retries} attempts for topic {topic_id} with model {model_name}."
+    await Client.send_message("me", final_error_msg)
     raise ValueError("Failed to get a valid Gemini model after multiple retries with available keys.")
 
-
 async def generate_gemini_response(input_data, chat_history, topic_id, model_name):
-    """
-    Generates a Gemini response for file-based inputs.
-    Now uses _get_gemini_model_with_retries to get the model with the specified model_name.
-    """
     try:
         model = await _get_gemini_model_with_retries(topic_id, model_name)
+        current_key_index = db.get(collection, "current_key_index") or 0
+
         response = model.generate_content(input_data)
         bot_response = response.text.strip()
+
+        if hasattr(response, 'usage_metadata'):
+            usage = response.usage_metadata
+            api_key_stats[str(current_key_index)][model_name]["total_prompt_tokens"] += usage.prompt_token_count
+            api_key_stats[str(current_key_index)][model_name]["total_completion_tokens"] += usage.candidates_token_count
+
+        db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
         chat_history.append(bot_response)
         db.set(collection, f"chat_history.{topic_id}", chat_history)
         return bot_response
     except Exception as e:
-        # Error during Gemini response generation, send to saved messages
         await Client.send_message(
             "me", f"❌ Error in generate_gemini_response for topic {topic_id}: {str(e)}"
         )
-        raise e # Re-raise to be handled by handle_files
-
+        raise e
 
 async def upload_file_to_gemini(file_path, file_type):
     uploaded_file = genai.upload_file(file_path)
@@ -177,29 +213,19 @@ async def upload_file_to_gemini(file_path, file_type):
         await asyncio.sleep(10)
         uploaded_file = genai.get_file(uploaded_file.name)
     if uploaded_file.state.name == "FAILED":
-        # Critical error during file upload, send to saved messages
         raise ValueError(f"{file_type.capitalize()} failed to process.")
     return uploaded_file
 
-
 async def send_typing_action(client, chat_id, user_message):
     await client.send_chat_action(chat_id=chat_id, action=enums.ChatAction.TYPING)
-    # Adjust sleep based on message length, but with a minimum/maximum
     await asyncio.sleep(min(len(user_message) / 10, 5))
-
 
 async def handle_voice_message(client, chat_id, bot_response, thread_id=None):
     if ".el" in bot_response:
         start_index = bot_response.find(".el")
-
-        if start_index != -1:
-            text_to_generate = bot_response[start_index + len(".el") :].strip()
-        else:
-            text_to_generate = bot_response.strip() # If .el is present but not at start, use whole response
-
+        text_to_generate = bot_response[start_index + len(".el"):].strip() if start_index != -1 else bot_response.strip()
         if not text_to_generate:
-            return False # Nothing to generate
-
+            return False
         try:
             audio_path = await generate_elevenlabs_audio(text=text_to_generate)
             if audio_path:
@@ -212,26 +238,24 @@ async def handle_voice_message(client, chat_id, bot_response, thread_id=None):
                 os.remove(audio_path)
                 return True
         except Exception as e:
-            # Error generating ElevenLabs audio, send to saved messages
-            await client.send_message(
+            await Client.send_message(
                 "me", f"❌ Error generating audio with ElevenLabs: {str(e)}. Falling back to text message."
             )
             if thread_id:
                 await client.send_message(
                     chat_id=chat_id,
-                    text=bot_response, # Send original full response if voice fails
+                    text=bot_response,
                     message_thread_id=thread_id,
                 )
             else:
                 await client.send_message(chat_id, bot_response)
-            return True # Consider it handled if text fallback occurs
+            return True
     return False
-
 
 @Client.on_message(filters.sticker & filters.group & ~filters.me, group=3)
 async def handle_sticker(client: Client, message: Message):
     try:
-        group_id = str(message.chat.id)  # Convert group_id to string
+        group_id = str(message.chat.id)
         thread_id_str = str(message.message_thread_id) if message.message_thread_id else "0"
         topic_id = f"{group_id}:{thread_id_str}"
         if topic_id in disabled_topics or (
@@ -243,14 +267,11 @@ async def handle_sticker(client: Client, message: Message):
         await asyncio.sleep(random.uniform(5, 10))
         await message.reply_text(random_smiley)
     except Exception as e:
-        # Error in sticker handler, send to saved messages
         await client.send_message(
             "me", f"❌ An error occurred in the `handle_sticker` function:\n\n{str(e)}"
         )
 
-
-################################################
-# --- Persistent Queue Helper Functions for Group Topics ---
+# Persistent Queue Helper Functions for Group Topics
 def load_group_message_queue(topic_id):
     data = db.get(collection, f"group_message_queue.{topic_id}")
     return deque(data) if data else deque()
@@ -263,16 +284,13 @@ def save_group_message_to_db(topic_id, message_text):
 def clear_group_message_queue(topic_id):
     db.set(collection, f"group_message_queue.{topic_id}", None)
 
-
-# --- In-Memory Structures for Group Queues & Active Processing ---
 group_message_queues = defaultdict(deque)
-active_topics = set()  # Track actively processing topics
+active_topics = set()
 
 @Client.on_message(filters.text & filters.group & ~filters.me, group=1)
 async def wchat(client: Client, message: Message):
     try:
         group_id = str(message.chat.id)
-        # Ensure message_thread_id is always a string, even if None
         thread_id_str = str(message.message_thread_id) if message.message_thread_id else "0"
         topic_id = f"{group_id}:{thread_id_str}"
         user_name = message.from_user.first_name if message.from_user else "User"
@@ -293,7 +311,6 @@ async def wchat(client: Client, message: Message):
         active_topics.add(topic_id)
         asyncio.create_task(process_group_messages(client, message, topic_id, user_name))
     except Exception as e:
-        # Error in main wchat handler, send to saved messages
         await client.send_message("me", f"❌ Error in wchat (main handler) for topic {topic_id}: {str(e)}")
 
 async def process_group_messages(client, message, topic_id, user_name):
@@ -303,34 +320,21 @@ async def process_group_messages(client, message, topic_id, user_name):
             await asyncio.sleep(delay)
 
             batch = []
-            # Pop up to 2 messages to form a batch
             for _ in range(2):
                 if group_message_queues[topic_id]:
                     batch.append(group_message_queues[topic_id].popleft())
 
             if not batch:
-                break # No messages left in the batch, exit loop
+                break
 
             combined_message = " ".join(batch)
-            # Clear the persistent queue after processing the batch
             clear_group_message_queue(topic_id)
 
-            # --- Determine bot role (text) and Gemini model to use ---
             bot_role = db.get(collection, f"custom_roles.{topic_id}") or group_roles.get(topic_id.split(":")[0]) or default_bot_role
-
-            # Get the effective secondary role text for comparison
-            effective_secondary_role_text = db.get(collection, f"custom_secondary_roles.{topic_id}")
-            if effective_secondary_role_text is None:
-                effective_secondary_role_text = db.get(collection, f"custom_secondary_roles.{message.chat.id}") # Check group secondary role
-            if effective_secondary_role_text is None:
-                effective_secondary_role_text = default_secondary_role # Fallback to default secondary role
-
-            # Choose the Gemini model based on the active bot_role text
-            if bot_role == effective_secondary_role_text:
-                model_to_use = SECONDARY_GEMINI_MODEL
-            else:
-                model_to_use = PRIMARY_GEMINI_MODEL
-            # --- End Model Determination ---
+            effective_secondary_role_text = db.get(collection, f"custom_secondary_roles.{topic_id}") or \
+                                           db.get(collection, f"custom_secondary_roles.{message.chat.id}") or \
+                                           default_secondary_role
+            model_to_use = SECONDARY_GEMINI_MODEL if bot_role == effective_secondary_role_text else PRIMARY_GEMINI_MODEL
 
             full_prompt = build_gemini_prompt(bot_role, get_chat_history(topic_id, bot_role, combined_message, user_name), combined_message)
 
@@ -341,47 +345,44 @@ async def process_group_messages(client, message, topic_id, user_name):
             max_length = 200
 
             try:
-                # Pass the determined model_to_use
                 model = await _get_gemini_model_with_retries(topic_id, model_to_use)
-
                 attempts = 0
                 while attempts < max_attempts:
                     response = model.start_chat().send_message(full_prompt)
                     bot_response = response.text.strip()
                     if len(bot_response) <= max_length:
-                        chat_history_list = get_chat_history(topic_id, bot_role, combined_message, user_name) # Re-fetch updated history
+                        chat_history_list = get_chat_history(topic_id, bot_role, combined_message, user_name)
                         chat_history_list.append(bot_response)
                         db.set(collection, f"chat_history.{topic_id}", chat_history_list)
                         break
                     attempts += 1
                 else:
                     bot_response = bot_response[:max_length] + "..." if len(bot_response) > max_length else bot_response
-                    chat_history_list = get_chat_history(topic_id, bot_role, combined_message, user_name) # Re-fetch updated history
+                    chat_history_list = get_chat_history(topic_id, bot_role, combined_message, user_name)
                     chat_history_list.append(bot_response)
                     db.set(collection, f"chat_history.{topic_id}", chat_history_list)
 
-            except ValueError as ve: # Catch specific error from _get_gemini_model_with_retries (e.g., no keys)
+            except ValueError as ve:
                 await client.send_message("me", f"❌ Failed to get Gemini model for topic {topic_id}: {ve}")
-                break # Break out of processing loop if no model can be obtained
-            except Exception as e: # Catch other errors during message generation
+                break
+            except Exception as e:
                 await client.send_message("me", f"❌ Error generating response for topic {topic_id}: {str(e)}")
-                break # Break out of processing loop on other errors
+                break
 
             if not bot_response:
-                continue # Continue to next message in queue if any
+                continue
 
             if await handle_voice_message(client, message.chat.id, bot_response, message.message_thread_id):
                 continue
 
-            # Simulate typing action for a more human-like response delay
             response_length = len(bot_response)
-            char_delay = 0.03 # Delay per character
+            char_delay = 0.03
             total_delay = response_length * char_delay
 
             elapsed_time = 0
             while elapsed_time < total_delay:
                 await send_typing_action(client, message.chat.id, bot_response)
-                await asyncio.sleep(2) # Send typing action every 2 seconds
+                await asyncio.sleep(2)
                 elapsed_time += 2
 
             await client.send_message(
@@ -390,15 +391,11 @@ async def process_group_messages(client, message, topic_id, user_name):
                 message_thread_id=message.message_thread_id,
             )
 
-        # Ensure active_topics is cleaned up when the queue is empty
         active_topics.discard(topic_id)
     except Exception as e:
-        # Critical error in processing group messages, send to saved messages
         await client.send_message("me", f"❌ Critical error in `process_group_messages` for topic {topic_id}: {str(e)}")
-        active_topics.discard(topic_id) # Ensure cleanup even on outer exceptions
+        active_topics.discard(topic_id)
 
-
-################################################
 @Client.on_message(filters.group & ~filters.me, group=2)
 async def handle_files(client: Client, message: Message):
     file_path = None
@@ -414,22 +411,11 @@ async def handle_files(client: Client, message: Message):
         ):
             return
 
-        # --- Determine bot role (text) and Gemini model to use ---
         bot_role = db.get(collection, f"custom_roles.{topic_id}") or group_roles.get(group_id) or default_bot_role
-
-        # Get the effective secondary role text for comparison
-        effective_secondary_role_text = db.get(collection, f"custom_secondary_roles.{topic_id}")
-        if effective_secondary_role_text is None:
-            effective_secondary_role_text = db.get(collection, f"custom_secondary_roles.{message.chat.id}") # Check group secondary role
-        if effective_secondary_role_text is None:
-            effective_secondary_role_text = default_secondary_role # Fallback to default secondary role
-
-        # Choose the Gemini model based on the active bot_role text
-        if bot_role == effective_secondary_role_text:
-            model_to_use = SECONDARY_GEMINI_MODEL
-        else:
-            model_to_use = PRIMARY_GEMINI_MODEL
-        # --- End Model Determination ---
+        effective_secondary_role_text = db.get(collection, f"custom_secondary_roles.{topic_id}") or \
+                                       db.get(collection, f"custom_secondary_roles.{message.chat.id}") or \
+                                       default_secondary_role
+        model_to_use = SECONDARY_GEMINI_MODEL if bot_role == effective_secondary_role_text else PRIMARY_GEMINI_MODEL
 
         caption = message.caption.strip() if message.caption else ""
         chat_history_list = get_chat_history(topic_id, bot_role, caption, user_name)
@@ -471,8 +457,6 @@ async def handle_files(client: Client, message: Message):
 
                         prompt_text = "User has sent multiple images." + (f" Caption: {caption}" if caption else "")
                         full_prompt = build_gemini_prompt(bot_role, chat_history_list, prompt_text)
-
-                        # Pass the determined model_to_use
                         response = await generate_gemini_response([full_prompt] + sample_images, chat_history_list, topic_id, model_to_use)
                         await client.send_message(message.chat.id, response, message_thread_id=message.message_thread_id)
                     except Exception as e_image_process:
@@ -486,7 +470,6 @@ async def handle_files(client: Client, message: Message):
                 return
 
         file_type, file_path = None, None
-
         if message.video or message.video_note:
             file_type, file_path = ("video", await client.download_media(message.video or message.video_note))
         elif message.audio or message.voice:
@@ -501,22 +484,16 @@ async def handle_files(client: Client, message: Message):
                 uploaded_file = await upload_file_to_gemini(file_path, file_type)
                 prompt_text = f"User has sent a {file_type}." + (f" Caption: {caption}" if caption else "")
                 full_prompt = build_gemini_prompt(bot_role, chat_history_list, prompt_text)
-
-                # Pass the determined model_to_use
                 response = await generate_gemini_response([full_prompt, uploaded_file], chat_history_list, topic_id, model_to_use)
                 return await client.send_message(message.chat.id, response, message_thread_id=message.message_thread_id)
-
             except Exception as e_file_process:
                 await client.send_message("me", f"❌ Error processing {file_type} in group `handle_files` for topic {topic_id}: {str(e_file_process)}")
 
     except Exception as e:
-        # Error in handle_files function, send to saved messages
         await client.send_message("me", f"❌ An error occurred in group `handle_files` function for topic {topic_id}:\n\n{str(e)}")
     finally:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
-           
-
 
 @Client.on_message(filters.command(["wchat", "wc"], prefix) & filters.me)
 async def wchat_command(client: Client, message: Message):
@@ -529,7 +506,7 @@ async def wchat_command(client: Client, message: Message):
             return
 
         command = parts[1].lower()
-        group_id = str(message.chat.id)  # Current group ID
+        group_id = str(message.chat.id)
 
         if command == "all":
             wchat_for_all_groups[group_id] = not wchat_for_all_groups.get(group_id, False)
@@ -585,7 +562,6 @@ async def wchat_command(client: Client, message: Message):
         await message.delete()
 
     except Exception as e:
-        # Error in wchat command, send to saved messages
         await client.send_message(
             "me", f"❌ An error occurred in the `wchat` command:\n\n{str(e)}"
         )
@@ -602,7 +578,7 @@ async def set_custom_role(client: Client, message: Message):
             return
 
         scope = parts[1].lower()
-        group_id = str(message.chat.id)  # Convert group_id to string
+        group_id = str(message.chat.id)
 
         if scope == "group":
             custom_role = " ".join(parts[2:]).strip()
@@ -646,10 +622,9 @@ async def set_custom_role(client: Client, message: Message):
         await asyncio.sleep(1)
         await message.delete()
     except Exception as e:
-        # Error in grole command, send to saved messages
         await client.send_message(
             "me", f"❌ An error occurred in the `grole` command:\n\n{str(e)}"
-                )
+        )
 
 @Client.on_message(filters.command("grolex", prefix) & filters.group & filters.me)
 async def toggle_or_reset_secondary_role(client: Client, message: Message):
@@ -774,22 +749,16 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
         else:
             await message.edit_text("Invalid scope. Use 'group' or 'topic'.")
     except Exception as e:
-        # Error in grolex command, send to saved messages
         await client.send_message(
             "me", f"❌ An error occurred in the `grolex` command:\n\n{str(e)}"
         )
-
-
-
 
 @Client.on_message(filters.command("setwkey", prefix) & filters.me)
 async def set_gemini_key(client: Client, message: Message):
     try:
         command = message.text.strip().split()
-        subcommand, key = (
-            command[1] if len(command) > 1 else None,
-            command[2] if len(command) > 2 else None,
-        )
+        subcommand = command[1].lower() if len(command) > 1 else None
+        key = command[2] if len(command) > 2 else None
 
         gemini_keys = db.get(collection, "gemini_keys") or []
         current_key_index = db.get(collection, "current_key_index") or 0
@@ -803,8 +772,6 @@ async def set_gemini_key(client: Client, message: Message):
             if 0 <= index < len(gemini_keys):
                 current_key_index = index
                 db.set(collection, "current_key_index", current_key_index)
-                # Re-configure the global genai object (though model is retrieved per call now)
-                genai.configure(api_key=gemini_keys[current_key_index])
                 await message.edit_text(f"Current Gemini API key set to key {key}.")
             else:
                 await message.edit_text(f"Invalid key index: {key}.")
@@ -812,13 +779,21 @@ async def set_gemini_key(client: Client, message: Message):
             index = int(key) - 1
             if 0 <= index < len(gemini_keys):
                 deleted_key = gemini_keys.pop(index)
-                db.set(collection, "gemini_keys", gemini_keys)
+                api_key_stats.pop(str(index), None)
+                db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
                 if current_key_index >= len(gemini_keys):
                     current_key_index = max(0, len(gemini_keys) - 1)
                     db.set(collection, "current_key_index", current_key_index)
                 await message.edit_text(f"Gemini API key {key} deleted successfully!")
             else:
                 await message.edit_text(f"Invalid key index: {key}.")
+        elif subcommand == "show":
+            if not gemini_keys:
+                await message.edit_text("No Gemini API keys available.")
+            else:
+                keys_list = "\n".join([f"{i + 1}. {key}" for i, key in enumerate(gemini_keys)])
+                await client.send_message("me", f"<b>Full Gemini API Keys:</b>\n\n{keys_list}")
+                await message.edit_text("Full API keys sent to saved messages.")
         else:
             keys_list = "\n".join(
                 [f"{i + 1}. {key[:10]}..." for i, key in enumerate(gemini_keys)]
@@ -828,13 +803,122 @@ async def set_gemini_key(client: Client, message: Message):
                 f"<b>Gemini API keys:</b>\n\n<code>{keys_list or 'No keys added.'}</code>\n\n<b>Current key:</b> <code>{current_key_display}</code>"
             )
 
-        await asyncio.sleep(1)
     except Exception as e:
-        # Error in setwkey command, send to saved messages
         await client.send_message(
             "me", f"❌ An error occurred in the `setwkey` command:\n\n{str(e)}"
         )
 
+@Client.on_message(filters.command("setwmodel", prefix) & filters.me)
+async def set_wmodel(client: Client, message: Message):
+    try:
+        parts = message.text.strip().split()
+        primary_model = db.get(collection, "primary_gemini_model") or PRIMARY_GEMINI_MODEL
+        secondary_model = db.get(collection, "secondary_gemini_model") or SECONDARY_GEMINI_MODEL
+
+        if len(parts) < 2:
+            await message.edit_text(
+                f"<b>Current Models:</b>\n"
+                f"Primary Model: {primary_model}\n"
+                f"Secondary Model: {secondary_model}\n\n"
+                f"<b>Usage:</b>\n"
+                f"{prefix}setwmodel primary <model_name>\n"
+                f"{prefix}setwmodel secondary <model_name>\n"
+                f"{prefix}setwmodel show\n"
+                f"Example: {prefix}setwmodel primary gemini-2.0-flash"
+            )
+            await asyncio.sleep(1)
+            await message.delete()
+            return
+
+        subcommand = parts[1].lower()
+        if subcommand == "show":
+            await message.edit_text(
+                f"<b>Current Gemini Models (WChat):</b>\n"
+                f"Primary Model: <code>{primary_model}</code>\n"
+                f"Secondary Model: <code>{secondary_model}</code>"
+            )
+            await asyncio.sleep(1)
+            await message.delete()
+            return
+
+        if len(parts) < 3:
+            await message.edit_text(f"Please provide a model name for {subcommand}.")
+            await asyncio.sleep(1)
+            await message.delete()
+            return
+
+        model_name = parts[2].strip()
+        valid_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+        if model_name not in valid_models:
+            await message.edit_text(
+                f"Invalid model name: {model_name}. Available models: {', '.join(valid_models)}"
+            )
+            await asyncio.sleep(1)
+            await message.delete()
+            return
+
+        if subcommand == "primary":
+            db.set(collection, "primary_gemini_model", model_name)
+            await message.edit_text(f"Primary Gemini model set to {model_name}.")
+        elif subcommand == "secondary":
+            db.set(collection, "secondary_gemini_model", model_name)
+            await message.edit_text(f"Secondary Gemini model set to {model_name}.")
+        else:
+            await message.edit_text(
+                f"Invalid subcommand. Use 'primary', 'secondary', or 'show'.\n"
+                f"Example: {prefix}setwmodel primary gemini-2.0-flash"
+            )
+
+    except Exception as e:
+        await client.send_message(
+            "me", f"❌ Error in `setwmodel` command:\n\n{str(e)}"
+        )
+
+@Client.on_message(filters.command("wstatus", prefix) & filters.me)
+async def wstatus(client: Client, message: Message):
+    try:
+        gemini_keys = db.get(collection, "gemini_keys") or []
+        current_key_index = db.get(collection, "current_key_index") or 0
+        primary_model = db.get(collection, "primary_gemini_model") or PRIMARY_GEMINI_MODEL
+        secondary_model = db.get(collection, "secondary_gemini_model") or SECONDARY_GEMINI_MODEL
+
+        usage_report = "<b>Gemini API Usage Status (WChat):</b>\n\n"
+        if not gemini_keys:
+            usage_report += "No Gemini API keys configured."
+        else:
+            usage_report += (
+                f"Total Keys: {len(gemini_keys)}\n"
+                f"Current Key Index: {current_key_index + 1 if gemini_keys else 0}\n"
+                f"Primary Model: {primary_model}\n"
+                f"Secondary Model: {secondary_model}\n\n"
+            )
+            for i, key in enumerate(gemini_keys):
+                key_str = str(i)
+                is_current = " (Current)" if i == current_key_index else ""
+                if key_str not in api_key_stats or not api_key_stats[key_str]:
+                    usage_report += (
+                        f"<b>Key {i + 1}{is_current}:</b>\n"
+                        f"  No usage data available for this key.\n\n"
+                    )
+                    continue
+                usage_report += (
+                    f"<b>Key {i + 1}{is_current} ({key[:10]}...):</b>\n"
+                )
+                for model_name, stats in api_key_stats[key_str].items():
+                    usage_report += (
+                        f"  <u>Model: {model_name}</u>\n"
+                        f"    Total Requests: {stats['total_requests']}\n"
+                        f"    Successful Responses: {stats['successful_responses']}\n"
+                        f"    Prompt Tokens: {stats['total_prompt_tokens']}\n"
+                        f"    Completion Tokens: {stats['total_completion_tokens']}\n"
+                    )
+                usage_report += "\n"
+
+        await message.edit_text(usage_report)
+    except Exception as e:
+        await client.send_message(
+            "me", f"❌ Error in `wstatus` command:\n\n{str(e)}"
+        )
 
 modules_help["wchat"] = {
     "wchat on": "Enable wchat for the current topic.",
@@ -843,11 +927,16 @@ modules_help["wchat"] = {
     "wchat all": "Toggle wchat for all topics in the current group.",
     "grole group <custom role>": "Set a custom role for the bot for the current group.",
     "grole topic <custom role>": "Set a custom role for the bot for the current topic and clear existing chat history.",
-    "grolex group/topic ": "Switch to secondary role or switch to default.",
+    "grolex group/topic": "Switch to secondary role or switch to default.",
     "grolex group <custom role>": "Set a custom secondary role for the bot for the current group.",
     "grolex topic <custom role>": "Set a custom secondary role for the bot for the current topic and clear existing chat history.",
     "setwkey add <key>": "Add a new Gemini API key.",
     "setwkey set <index>": "Set the current Gemini API key by index.",
-    "setwkey del <index>": "Delete a Gemini API key by index.",
-    "setwkey": "Display all available Gemini API keys and the current key.",
+    "setwkey del <index>": "Delete a Gemini API key by index and reset its usage stats.",
+    "setwkey show": "Send full Gemini API keys to saved messages.",
+    "setwkey": "Display all available Gemini API keys (partial) and the current key.",
+    "setwmodel primary <model_name>": "Set the Gemini model for the primary role (e.g., gemini-2.0-flash).",
+    "setwmodel secondary <model_name>": "Set the Gemini model for the secondary role (e.g., gemini-1.5-flash).",
+    "setwmodel show": "Display the currently configured Gemini models.",
+    "wstatus": "Display Gemini API usage statistics (requests, tokens) per key and per model."
 }
