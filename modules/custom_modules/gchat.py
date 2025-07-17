@@ -12,6 +12,7 @@ from utils.db import db
 from utils.misc import modules_help, prefix
 from utils.scripts import import_library
 from modules.custom_modules.elevenlabs import generate_elevenlabs_audio
+import time
 
 # Initialize Gemini AI
 genai = import_library("google.generativeai", "google-generativeai")
@@ -526,7 +527,7 @@ async def gchat_command(client: Client, message: Message):
     except Exception as e:
         await client.send_message("me", f"An error occurred in the `gchat` command:\n\n{str(e)}")
 
-@Client.on_message(filters.command(["role"], prefix) & filters.me)
+@Client.on_message(filters.command("role", prefix) & filters.me)
 async def set_custom_role(client: Client, message: Message):
     try:
         parts = message.text.strip().split()
@@ -557,28 +558,19 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
             global_shift = db.get(collection, "global_role_shift") or "primary"
             new_state = "secondary" if global_shift == "primary" else "primary"
             count = 0
-            # Collect all users with any relevant database entries
-            all_users = set(enabled_users + disabled_users)
-            for key in db.get(collection, "") or {}:
-                if key.startswith(("custom_roles.", "custom_roles_primary.", "custom_roles_secondary.", "chat_history.")):
-                    try:
-                        uid = int(key.split(".", 1)[1])
-                        all_users.add(uid)
-                    except ValueError:
-                        continue
-            for uid in all_users:
-                primary_role = db.get(collection, f"custom_roles_primary.{uid}") or default_bot_role
-                custom_secondary = db.get(collection, f"custom_roles_secondary.{uid}")
-                secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
+            for uid in set(enabled_users + disabled_users):
                 if new_state == "primary":
+                    primary_role = db.get(collection, f"custom_roles_primary.{uid}") or default_bot_role
                     db.set(collection, f"custom_roles.{uid}", primary_role)
-                    db.set(collection, f"chat_history.{uid}", None)
                 else:
+                    custom_secondary = db.get(collection, f"custom_roles_secondary.{uid}")
+                    secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
                     db.set(collection, f"custom_roles.{uid}", secondary_role)
-                    db.set(collection, f"chat_history.{uid}", None)
+                db.set(collection, f"chat_history.{uid}", None)
                 count += 1
             db.set(collection, "global_role_shift", new_state)
-            await client.send_message("me", f"Force-shifted {count} users to {new_state} role.")
+            db.set(collection, "global_current_role", new_state)
+            await client.send_message("me", f"Force-shifted roles for {count} users to {new_state} role.")
             return
 
         reset_command = parts[-1].lower() == "r"
@@ -629,8 +621,7 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
 async def set_gemini_key(client: Client, message: Message):
     try:
         command = message.text.strip().split()
-        subcommand = command[1].lower() if len(command) > 1 else None
-        key = command[2] if len(command) > 2 else None
+        subcommand, key = command[1] if len(command) > 1 else None, command[2] if len(command) > 2 else None
 
         gemini_keys = db.get(collection, "gemini_keys") or []
         current_key_index = db.get(collection, "current_key_index") or 0
@@ -659,13 +650,6 @@ async def set_gemini_key(client: Client, message: Message):
                 await message.edit_text(f"Gemini API key {key} deleted successfully!")
             else:
                 await message.edit_text(f"Invalid key index: {key}.")
-        elif subcommand == "show":
-            if not gemini_keys:
-                await message.edit_text("No Gemini API keys available.")
-            else:
-                keys_list = "\n".join([f"{i + 1}. {key}" for i, key in enumerate(gemini_keys)])
-                await client.send_message("me", f"<b>Full Gemini API Keys:</b>\n\n{keys_list}")
-                await message.edit_text("Full API keys sent to saved messages.")
         else:
             keys_list = "\n".join(
                 [f"{i + 1}. {key[:10]}..." for i, key in enumerate(gemini_keys)]
@@ -773,7 +757,6 @@ modules_help["gchat"] = {
     "setgkey add <key>": "Add a new Gemini API key.",
     "setgkey set <index>": "Set the current Gemini API key by index.",
     "setgkey del <index>": "Delete a Gemini API key by index.",
-    "setgkey show": "Send full Gemini API keys to saved messages.",
     "setgkey": "Display all available Gemini API keys and the current key.",
     "setgmodel default <model_name>": "Set the Gemini model for the default role (e.g., gemini-2.0-flash) in gchat.",
     "setgmodel secondary <model_name>": "Set the Gemini model for the secondary role (e.g., gemini-1.5-flash) in gchat.",
