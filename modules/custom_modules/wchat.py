@@ -26,8 +26,10 @@ safety_settings = [
 ]
 
 # --- Gemini Model Definitions ---
+# These are the models that will be used for primary and secondary roles.
+# You can change these to other available Gemini models as needed.
 PRIMARY_GEMINI_MODEL = "gemini-2.0-flash"
-SECONDARY_GEMINI_MODEL = "gemini-1.5-pro" # Consider "gemini-1.5-pro" for more complex tasks/sexting
+SECONDARY_GEMINI_MODEL = "gemini-1.5-flash" # Consider "gemini-1.5-pro" for more complex tasks/sexting
 
 # Default bot role and database collection
 default_bot_role = ("You are Nick, a 20-year-old from Phoenix, working in real estate. "
@@ -60,6 +62,10 @@ enabled_topics = db.get(collection, "enabled_topics") or []
 disabled_topics = db.get(collection, "disabled_topics") or []
 wchat_for_all_groups = db.get(collection, "wchat_for_all_groups") or {}
 group_roles = db.get(collection, "group_roles") or {}
+
+# List of random smileys
+smileys = ["-.-", "):", ":)", "*.*", ")*"]
+
 
 def get_chat_history(topic_id, bot_role, user_message, user_name):
     chat_history = db.get(collection, f"chat_history.{topic_id}") or [
@@ -221,6 +227,26 @@ async def handle_voice_message(client, chat_id, bot_response, thread_id=None):
             return True # Consider it handled if text fallback occurs
     return False
 
+
+@Client.on_message(filters.sticker & filters.group & ~filters.me, group=3)
+async def handle_sticker(client: Client, message: Message):
+    try:
+        group_id = str(message.chat.id)  # Convert group_id to string
+        thread_id_str = str(message.message_thread_id) if message.message_thread_id else "0"
+        topic_id = f"{group_id}:{thread_id_str}"
+        if topic_id in disabled_topics or (
+            not wchat_for_all_groups.get(group_id, False)
+            and topic_id not in enabled_topics
+        ):
+            return
+        random_smiley = random.choice(smileys)
+        await asyncio.sleep(random.uniform(5, 10))
+        await message.reply_text(random_smiley)
+    except Exception as e:
+        # Error in sticker handler, send to saved messages
+        await client.send_message(
+            "me", f"❌ An error occurred in the `handle_sticker` function:\n\n{str(e)}"
+        )
 
 
 ################################################
@@ -816,6 +842,36 @@ async def set_gemini_key(client: Client, message: Message):
         await client.send_message(
             "me", f"❌ An error occurred in the `setwkey` command:\n\n{str(e)}"
         )
+@Client.on_message(filters.command("setwmodel", prefix) & filters.me)
+async def set_wchat_model(client: Client, message: Message):
+    try:
+        parts = message.text.strip().split()
+        if len(parts) < 3:
+            await message.edit_text(
+                f"<b>Usage:</b> {prefix}setwmodel [default|secondary] <model_name>"
+            )
+            return
+
+        model_type = parts[1].lower()
+        model_name = " ".join(parts[2:]).strip()
+        if not model_name:
+            await message.edit_text("Please specify a model name.")
+            return
+
+        if model_type == "default":
+            db.set(collection, "default_gmodel_name", model_name)
+            await message.edit_text(f"✅ Default Gemini model set to `{model_name}` for wchat.")
+        elif model_type == "secondary":
+            db.set(collection, "secondary_gmodel_name", model_name)
+            await message.edit_text(f"✅ Secondary Gemini model set to `{model_name}` for wchat.")
+        else:
+            await message.edit_text("Invalid type. Use `default` or `secondary`.")
+        
+        await asyncio.sleep(1)
+        await message.delete()
+
+    except Exception as e:
+        await client.send_message("me", f"❌ Error in `setwmodel`: {str(e)}")
 @Client.on_message(filters.command("wstatus", prefix) & filters.me)
 async def wchat_gemini_status(client: Client, message: Message):
     try:
@@ -859,36 +915,6 @@ async def wchat_gemini_status(client: Client, message: Message):
 
     except Exception as e:
         await client.send_message("me", f"❌ Error in `wstatus`: {str(e)}")
-@Client.on_message(filters.command("setwmodel", prefix) & filters.me)
-async def set_wchat_model(client: Client, message: Message):
-    try:
-        parts = message.text.strip().split()
-        if len(parts) < 3:
-            await message.edit_text(
-                f"<b>Usage:</b> {prefix}setwmodel [default|secondary] <model_name>"
-            )
-            return
-
-        model_type = parts[1].lower()
-        model_name = " ".join(parts[2:]).strip()
-        if not model_name:
-            await message.edit_text("Please specify a model name.")
-            return
-
-        if model_type == "default":
-            db.set(collection, "default_gmodel_name", model_name)
-            await message.edit_text(f"✅ Default Gemini model set to `{model_name}` for wchat.")
-        elif model_type == "secondary":
-            db.set(collection, "secondary_gmodel_name", model_name)
-            await message.edit_text(f"✅ Secondary Gemini model set to `{model_name}` for wchat.")
-        else:
-            await message.edit_text("Invalid type. Use `default` or `secondary`.")
-        
-        await asyncio.sleep(1)
-        await message.delete()
-
-    except Exception as e:
-        await client.send_message("me", f"❌ Error in `setwmodel`: {str(e)}")
 
 
 modules_help["wchat"] = {
