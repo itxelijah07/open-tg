@@ -326,14 +326,10 @@ async def process_group_messages(client, message, topic_id, user_name):
                 effective_secondary_role_text = default_secondary_role # Fallback to default secondary role
 
             # Choose the Gemini model based on the active bot_role text
-            default_model = db.get(collection, "default_gmodel_name") or PRIMARY_GEMINI_MODEL
-secondary_model = db.get(collection, "secondary_gmodel_name") or SECONDARY_GEMINI_MODEL
-
-if bot_role == effective_secondary_role_text:
-    model_to_use = secondary_model
-else:
-    model_to_use = default_model
-
+            if bot_role == effective_secondary_role_text:
+                model_to_use = SECONDARY_GEMINI_MODEL
+            else:
+                model_to_use = PRIMARY_GEMINI_MODEL
             # --- End Model Determination ---
 
             full_prompt = build_gemini_prompt(bot_role, get_chat_history(topic_id, bot_role, combined_message, user_name), combined_message)
@@ -429,14 +425,10 @@ async def handle_files(client: Client, message: Message):
             effective_secondary_role_text = default_secondary_role # Fallback to default secondary role
 
         # Choose the Gemini model based on the active bot_role text
-        default_model = db.get(collection, "default_gmodel_name") or PRIMARY_GEMINI_MODEL
-secondary_model = db.get(collection, "secondary_gmodel_name") or SECONDARY_GEMINI_MODEL
-
-if bot_role == effective_secondary_role_text:
-    model_to_use = secondary_model
-else:
-    model_to_use = default_model
-
+        if bot_role == effective_secondary_role_text:
+            model_to_use = SECONDARY_GEMINI_MODEL
+        else:
+            model_to_use = PRIMARY_GEMINI_MODEL
         # --- End Model Determination ---
 
         caption = message.caption.strip() if message.caption else ""
@@ -842,79 +834,6 @@ async def set_gemini_key(client: Client, message: Message):
         await client.send_message(
             "me", f"❌ An error occurred in the `setwkey` command:\n\n{str(e)}"
         )
-@Client.on_message(filters.command("setwmodel", prefix) & filters.me)
-async def set_wchat_model(client: Client, message: Message):
-    try:
-        parts = message.text.strip().split()
-        if len(parts) < 3:
-            await message.edit_text(
-                f"<b>Usage:</b> {prefix}setwmodel [default|secondary] <model_name>"
-            )
-            return
-
-        model_type = parts[1].lower()
-        model_name = " ".join(parts[2:]).strip()
-        if not model_name:
-            await message.edit_text("Please specify a model name.")
-            return
-
-        if model_type == "default":
-            db.set(collection, "default_gmodel_name", model_name)
-            await message.edit_text(f"✅ Default Gemini model set to `{model_name}` for wchat.")
-        elif model_type == "secondary":
-            db.set(collection, "secondary_gmodel_name", model_name)
-            await message.edit_text(f"✅ Secondary Gemini model set to `{model_name}` for wchat.")
-        else:
-            await message.edit_text("Invalid type. Use `default` or `secondary`.")
-        
-        await asyncio.sleep(1)
-        await message.delete()
-
-    except Exception as e:
-        await client.send_message("me", f"❌ Error in `setwmodel`: {str(e)}")
-@Client.on_message(filters.command("wstatus", prefix) & filters.me)
-async def wchat_gemini_status(client: Client, message: Message):
-    try:
-        # Load model configs from DB
-        default_model = db.get(collection, "default_gmodel_name") or PRIMARY_GEMINI_MODEL
-        secondary_model = db.get(collection, "secondary_gmodel_name") or SECONDARY_GEMINI_MODEL
-
-        # API key stats
-        gemini_keys = db.get(collection, "gemini_keys") or []
-        current_index = db.get(collection, "current_key_index") or 0
-        total_keys = len(gemini_keys)
-
-        key_stats = db.get(collection, "api_key_stats") or {}
-
-        report_lines = [
-            "<b>📊 WChat Gemini API Status</b>\n",
-            f"🗝️ <b>Total API Keys:</b> {total_keys}",
-            f"▶️ <b>Current Key Index:</b> {current_index + 1 if total_keys > 0 else 'N/A'}",
-            f"🤖 <b>Default Model:</b> {default_model}",
-            f"🤖 <b>Secondary Model:</b> {secondary_model}",
-            ""
-        ]
-
-        if key_stats:
-            for key_idx, models in key_stats.items():
-                report_lines.append(f"<b>🔑 API Key {int(key_idx) + 1}</b>")
-                for model_name, stats in models.items():
-                    report_lines.append(
-                        f"• <b>{model_name}</b>\n"
-                        f"   • Total Requests: {stats.get('total_requests', 0)}\n"
-                        f"   • Successful: {stats.get('successful_responses', 0)}\n"
-                        f"   • Prompt Tokens: {stats.get('total_prompt_tokens', 0)}\n"
-                        f"   • Completion Tokens: {stats.get('total_completion_tokens', 0)}\n"
-                    )
-        else:
-            report_lines.append("No key usage stats found.")
-
-        await message.edit_text("\n".join(report_lines))
-        await asyncio.sleep(5)
-        await message.delete()
-
-    except Exception as e:
-        await client.send_message("me", f"❌ Error in `wstatus`: {str(e)}")
 
 
 modules_help["wchat"] = {
