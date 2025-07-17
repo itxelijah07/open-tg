@@ -432,13 +432,13 @@ async def handle_files(client: Client, message: Message):
 
         # DO NOT mark as read here. We will mark it after the bot responds.
 
-        # For file handling, we'll generally use the default model for now,
-        # unless a specific secondary model for multimodal is set later.
-        model_to_use = default_gmodel_name 
-        bot_role = (
-            db.get(collection, f"custom_roles.{user_id}")
-            or default_bot_role
-        )
+        # Choose the Gemini model based on the active bot_role text
+        if bot_role == effective_secondary_role_text:
+            model_to_use = SECONDARY_GEMINI_MODEL
+        else:
+            model_to_use = PRIMARY_GEMINI_MODEL
+        # --- End Model Determination ---
+
         caption = message.caption.strip() if message.caption else ""
         chat_history_list = get_chat_history(user_id, bot_role, caption, user_name)
 
