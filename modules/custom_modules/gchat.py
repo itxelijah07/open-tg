@@ -143,8 +143,7 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
     """
     gemini_keys = db.get(collection, "gemini_keys") or []
     if not gemini_keys:
-        error_msg = f"[{datetime.now().strftime('%H:%M:%S')}] Error: No Gemini API keys found for user {user_id}. Please add keys using .setgkey add <key>"
-        print(error_msg)
+        error_msg = f"Error: No Gemini API keys found for user {user_id}. Please add keys using .setgkey add <key>"
         await client.send_message("me", error_msg)
         raise ValueError("No Gemini API keys configured.")
 
@@ -161,15 +160,12 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
             if not (0 <= current_key_index < len(gemini_keys)):
                 current_key_index = 0 # Reset to first key if out of bounds
                 db.set(collection, "current_key_index", current_key_index)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Reset current_key_index to 0 for user {user_id}.")
 
             current_key = gemini_keys[current_key_index]
             genai.configure(api_key=current_key)
             
             model = genai.GenerativeModel(model_name)
             model.safety_settings = safety_settings
-            
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Using Gemini API key at index {current_key_index} (attempt {attempt+1}/{total_retries}) for user {user_id} with model {model_name}.")
             
             # Increment total requests for the current key and model before the API call
             api_key_stats[str(current_key_index)][model_name]["total_requests"] += 1
@@ -187,12 +183,10 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
             api_key_stats[str(current_key_index)][model_name]["successful_responses"] += 1
             db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats)) # Persist stats
 
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Gemini response received for {user_id} with key index {current_key_index}.")
             return bot_response
 
         except Exception as e:
-            error_message = f"[{datetime.now().strftime('%H:%M:%S')}] ❌ API Error for user {user_id} with key index {current_key_index} (model: {model_name}): {str(e)}"
-            print(error_message)
+            error_message = f"❌ API Error for user {user_id} with key index {current_key_index} (model: {model_name}): {str(e)}"
             
             # Prepare usage stats for the key and model that just failed
             failed_key_model_stats = api_key_stats[str(current_key_index)][model_name]
@@ -214,7 +208,6 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
                 # Cycle to the next key
                 current_key_index = (current_key_index + 1) % len(gemini_keys)
                 db.set(collection, "current_key_index", current_key_index)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Switching to key index {current_key_index} for user {user_id}. Waiting 4s.")
                 await asyncio.sleep(4) # Wait before retrying with a new key
             else:
                 # For other unexpected errors, re-raise immediately if it's the last attempt for this key,
@@ -225,12 +218,10 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
                 else:
                     current_key_index = (current_key_index + 1) % len(gemini_keys)
                     db.set(collection, "current_key_index", current_key_index)
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Switching to key index {current_key_index} for user {user_id} due to unexpected error. Waiting 2s.")
                     await asyncio.sleep(2)
 
     # If loop finishes, all retries failed
-    final_error_msg = f"[{datetime.now().strftime('%H:%M:%S')}] ❌ All Gemini API keys failed after {total_retries} attempts for user {user_id} with model {model_name}. Message not processed."
-    print(final_error_msg)
+    final_error_msg = f"❌ All Gemini API keys failed after {total_retries} attempts for user {user_id} with model {model_name}. Message not processed."
     await client.send_message("me", final_error_msg)
     raise Exception("All Gemini API keys failed.")
 
@@ -255,7 +246,6 @@ async def handle_voice_message(client, chat_id, bot_response, message_id):
                 os.remove(audio_path)
                 return True
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error generating audio with ElevenLabs: {str(e)}. Falling back to text message.")
             bot_response = bot_response[3:].strip() # Remove .el prefix for text fallback
             await client.send_message(chat_id, bot_response)
             await client.read_chat_history(chat_id=chat_id, max_id=message_id) # Mark as read after text fallback
@@ -274,12 +264,10 @@ def save_user_message_to_db(user_id, message_text):
     queue = db.get(collection, f"user_message_queue.{user_id}") or []
     queue.append(message_text)
     db.set(collection, f"user_message_queue.{user_id}", queue)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Saved message to DB queue for user {user_id}. Current queue size: {len(queue)}")
 
 
 def clear_user_message_queue(user_id):
     db.set(collection, f"user_message_queue.{user_id}", None)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Cleared DB queue for user {user_id}.")
 
 
 # --- In-Memory Structures for User Queues & Active Processing ---
@@ -294,51 +282,39 @@ async def gchat(client: Client, message: Message):
         user_name = message.from_user.first_name or "User"
         user_message = message.text.strip()
 
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Received message from user {user_id}: {user_message[:50]}...")
-
         if user_id in disabled_users or (not gchat_for_all and user_id not in enabled_users):
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] GChat disabled for user {user_id}. Ignoring message.")
             return
 
         # --- NEW ADDITION: Filter out WhatsApp bridge reaction messages ---
         if user_message.startswith("Reacted to this message with"):
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Skipping GChat response to WhatsApp reaction message for user {user_id}")
             return # Exit the function, do not process this message
 
         # Load persistent queue if empty or first-time access
         if user_id not in user_message_queues or not user_message_queues[user_id]:
             user_message_queues[user_id] = load_user_message_queue(user_id)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Loaded queue for user {user_id}. Initial size: {len(user_message_queues[user_id])}")
 
         # Add the new message to the queue
         user_message_queues[user_id].append(user_message)
         save_user_message_to_db(user_id, user_message)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Message added to in-memory queue for user {user_id}. Current size: {len(user_message_queues[user_id])}")
-
 
         # If already processing, don't start a new task
         if user_id in active_users:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] User {user_id} is already active. Message queued for later processing.")
             return
 
         # DO NOT mark as read here. We will mark it after the bot responds.
 
         # Start processing messages for the user
         active_users.add(user_id)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting new processing task for user {user_id}.")
         asyncio.create_task(process_messages(client, message, user_id, user_name))
 
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in `gchat` (main handler) for user {user_id}: {str(e)}")
         await client.send_message("me", f"❌ Error in gchat: {str(e)}")
 
 
 async def process_messages(client, message, user_id, user_name):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting process_messages for user: {user_id}")
     try:
         while user_message_queues[user_id]:  # Keep processing until queue is empty
             delay = random.choice([6, 10, 12])
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Waiting for {delay} seconds before processing next batch for user {user_id}.")
             await asyncio.sleep(delay)
 
             batch = []
@@ -347,11 +323,9 @@ async def process_messages(client, message, user_id, user_name):
                     batch.append(user_message_queues[user_id].popleft())
 
             if not batch:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] No messages left in batch for user {user_id}. Breaking processing loop.")
                 break
 
             combined_message = " ".join(batch)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Processing batch for user {user_id}. Combined message: {combined_message[:100]}...")
             clear_user_message_queue(user_id)
 
             # Determine which role is active (primary or secondary)
@@ -390,10 +364,8 @@ async def process_messages(client, message, user_id, user_name):
 
             # Construct the prompt using the (possibly limited) chat history
             full_prompt = build_gemini_prompt(bot_role_content, limited_history, combined_message)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Full prompt for user {user_id}:\n{full_prompt[:500]}...") # Log part of the prompt
 
             await send_typing_action(client, message.chat.id, combined_message)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Sent typing action for user {user_id}.")
 
             bot_response = ""
             try:
@@ -402,16 +374,13 @@ async def process_messages(client, message, user_id, user_name):
                 # Ensure response length is managed
                 max_length = 200
                 if len(bot_response) > max_length:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Gemini response for user {user_id} too long ({len(bot_response)} chars). Truncating.")
                     bot_response = bot_response[:max_length] + "..."
                 
                 chat_history_list.append(bot_response)
                 db.set(collection, f"chat_history.{user_id}", chat_history_list)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Gemini response for user {user_id} processed: {bot_response[:100]}...")
 
                 # Pass message.id to handle_voice_message so it can mark as read
                 if await handle_voice_message(client, message.chat.id, bot_response, message.id):
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Voice message handled for user {user_id}.")
                     continue # Move to next item in queue
 
                 # Simulate typing delay based on response length
@@ -424,10 +393,8 @@ async def process_messages(client, message, user_id, user_name):
                     await send_typing_action(client, message.chat.id, bot_response)
                     await asyncio.sleep(2)
                     elapsed_time += 2
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Typing simulation complete for user {user_id}. Total delay: {total_delay:.2f}s.")
 
                 await message.reply_text(bot_response)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Sending final response to user {user_id}: {bot_response[:100]}...")
                 # Mark the message as read ONLY AFTER the bot has sent its reply
                 await client.read_chat_history(chat_id=message.chat.id, max_id=message.id)
                 
@@ -435,20 +402,16 @@ async def process_messages(client, message, user_id, user_name):
                 # If API call fails after all retries, re-add the batch to the front of the queue
                 user_message_queues[user_id].extendleft(reversed(batch))
                 save_user_message_to_db(user_id, combined_message) # Re-save to persistent queue
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Critical: Failed to process message after all retries for user {user_id}. Re-queued. Error: {api_call_e}")
-                await client.send_message("me", f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Critical: Failed to process message for user {user_id} after all API key retries. Message re-queued. Error: {str(api_call_e)}")
+                await client.send_message("me", f"❌ Critical: Failed to process message for user {user_id} after all API key retries. Message re-queued. Error: {str(api_call_e)}")
                 break # Break out of the while loop for this user to avoid infinite retries on persistent errors
 
         # Once all messages are processed, remove from active_users
         active_users.discard(user_id)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Processing finished for user {user_id}. Removed from active_users.")
 
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Critical error in `process_messages` for user {user_id}: {str(e)}")
         await client.send_message("me", f"❌ Critical error in `process_messages` for user {user_id}: {str(e)}")
     finally:
         active_users.discard(user_id)  # Ensure user is removed from active list in case of error
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Finally block executed, removed user {user_id} from active_users.")
 
 
 ###################################################################################################
@@ -459,15 +422,12 @@ async def handle_files(client: Client, message: Message):
     file_path = None
     try:
         user_id, user_name = message.from_user.id, message.from_user.first_name or "User"
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Received file message from user {user_id}.")
 
         if user_id in disabled_users or (not gchat_for_all and user_id not in enabled_users):
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] File handler: GChat disabled for user {user_id}. Ignoring file.")
             return
 
         # --- IMPORTANT: We also need to filter these in handle_files if they come as a caption ---
         if message.caption and message.caption.strip().startswith("Reacted to this message with"):
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Skipping handle_files for WhatsApp reaction message (with caption) for user {user_id}")
             return
 
         # DO NOT mark as read here. We will mark it after the bot responds.
@@ -483,7 +443,6 @@ async def handle_files(client: Client, message: Message):
         chat_history_list = get_chat_history(user_id, bot_role, caption, user_name)
 
         if message.photo:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Photo received for user {user_id}.")
             if not hasattr(client, "image_buffer"):
                 client.image_buffer = {}
                 client.image_timers = {}
@@ -494,22 +453,18 @@ async def handle_files(client: Client, message: Message):
 
             image_path = await client.download_media(message.photo)
             client.image_buffer[user_id].append(image_path)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Image downloaded to {image_path}. Buffer for user {user_id}: {len(client.image_buffer[user_id])} images.")
 
 
             if client.image_timers[user_id] is None:
 
                 async def process_images():
                     try:  # Error handling for image processing
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting image processing timer for user {user_id} (5s delay).")
                         await asyncio.sleep(5)
                         image_paths = client.image_buffer.pop(user_id, [])
                         client.image_timers[user_id] = None
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Image processing timer elapsed for user {user_id}. Processing {len(image_paths)} images.")
 
 
                         if not image_paths:
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] No images found in buffer for user {user_id} after timer.")
                             return
 
                         sample_images = []
@@ -517,12 +472,10 @@ async def handle_files(client: Client, message: Message):
                             try:
                                 sample_images.append(Image.open(img_path))
                             except Exception as img_open_e:
-                                print(f"[{datetime.now().strftime('%H:%M:%S')}] Error opening image {img_path}: {img_open_e}")
                                 # Try to clean up invalid image path
                                 if os.path.exists(img_path):
                                     os.remove(img_path)
                         if not sample_images:
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] No valid images to process for user {user_id}.")
                             return
 
                         prompt_text = "User has sent multiple images." + \
@@ -530,14 +483,12 @@ async def handle_files(client: Client, message: Message):
                         full_prompt = build_gemini_prompt(
                             bot_role, chat_history_list, prompt_text
                         )  # Use build_gemini_prompt
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Sending images and prompt to Gemini for user {user_id}.")
 
 
                         input_data = [full_prompt] + sample_images
                         response = await _call_gemini_api(
                             client, input_data, user_id, model_to_use, chat_history_list, is_image_input=True
                         )
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Gemini response for images for user {user_id}: {response[:100]}...")
 
 
                         await message.reply_text(response, reply_to_message_id=message.id)
@@ -545,7 +496,6 @@ async def handle_files(client: Client, message: Message):
                         await client.read_chat_history(chat_id=message.chat.id, max_id=message.id)
 
                     except Exception as e_image_process:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error processing images in `handle_files` for user {user_id}: {str(e_image_process)}")
                         await client.send_message(
                             "me",
                             f"Error processing images in `handle_files` for user {user_id}: {str(e_image_process)}",
@@ -554,7 +504,6 @@ async def handle_files(client: Client, message: Message):
                         for img_path in image_paths:
                             if os.path.exists(img_path):
                                 os.remove(img_path)
-                                print(f"[{datetime.now().strftime('%H:%M:%S')}] Cleaned up image file: {img_path}")
 
 
                 client.image_timers[user_id] = asyncio.create_task(process_images())
@@ -566,37 +515,30 @@ async def handle_files(client: Client, message: Message):
             file_type, file_path = "video", await client.download_media(
                 message.video or message.video_note
             )
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Video/Video Note downloaded: {file_path}")
         elif message.audio or message.voice:
             file_type, file_path = "audio", await client.download_media(
                 message.audio or message.voice
             )
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Audio/Voice downloaded: {file_path}")
         elif message.document and message.document.file_name.lower().endswith(".pdf"):
             file_type, file_path = "pdf", await client.download_media(message.document)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] PDF document downloaded: {file_path}")
         elif message.document:
             file_type, file_path = "document", await client.download_media(message.document)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Generic document downloaded: {file_path}")
 
 
         if file_path and file_type:
             try:  # Error handling for file upload and response generation
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Uploading {file_type} to Gemini for user {user_id}.")
                 uploaded_file = await upload_file_to_gemini(file_path, file_type)
                 prompt_text = f"User has sent a {file_type}." + \
                               (f" Caption: {caption}" if caption else "")
                 full_prompt = build_gemini_prompt(
                     bot_role, chat_history_list, prompt_text
                 )  # Use build_gemini_prompt
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Generating response for {file_type} for user {user_id}.")
 
 
                 input_data = [full_prompt, uploaded_file]
                 response = await _call_gemini_api(
                     client, input_data, user_id, model_to_use, chat_history_list, is_image_input=True
                 )
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Gemini response for {file_type} for user {user_id}: {response[:100]}...")
 
                 await message.reply_text(response, reply_to_message_id=message.id)
                 # Mark the message as read ONLY AFTER the bot has sent its reply
@@ -604,21 +546,18 @@ async def handle_files(client: Client, message: Message):
                 return
 
             except Exception as e_file_process:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Error processing {file_type} in `handle_files` for user {user_id}: {str(e_file_process)}")
                 await client.send_message(
                     "me",
                     f"Error processing {file_type} in `handle_files` for user {user_id}: {str(e_file_process)}",
                 )
 
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in `handle_files` function for user {user_id}:\n\n{str(e)}")
         await client.send_message(
             "me", f"An error occurred in `handle_files` function for user {user_id}:\n\n{str(e)}"
         )
     finally:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Cleaned up file: {file_path}")
 
 
 @Client.on_message(filters.command(["gchat", "gc"], prefix) & filters.me)
@@ -688,7 +627,6 @@ async def gchat_command(client: Client, message: Message):
         await asyncio.sleep(0.02)
         await message.delete()
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in the `gchat` command:\n\n{str(e)}")
         await client.send_message("me", f"An error occurred in the `gchat` command:\n\n{str(e)}")
 
 
@@ -716,7 +654,6 @@ async def set_custom_role(client: Client, message: Message):
         await asyncio.sleep(0.02)
         await message.delete()
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in the `role` command:\n\n{str(e)}")
         await client.send_message("me", f"An error occurred in the `role` command:\n\n{str(e)}")
 
 
@@ -743,13 +680,11 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
                 # Clear chat history for each user.
                 db.set(collection, f"chat_history.{uid}", None)
                 count += 1
-                # await asyncio.sleep(0.02) # Removed sleep for faster global operation
             # Update the global flag for the next force shift.
             db.set(collection, "global_role_shift", new_state)
             # Update global current role for upcoming new users.
             db.set(collection, "global_current_role", new_state)
             await client.send_message("me", f"Force-shifted roles for {count} users to {new_state} role.")
-            # await message.delete() # Removed deletion
             return
 
         # Individual user functionality remains unchanged.
@@ -772,8 +707,6 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
                 db.set(collection, f"custom_roles.{user_id}", default_secondary_role)
             await client.send_message("me", f"Secondary role reset to default for user {user_id}:\n{default_secondary_role}")
             db.set(collection, f"chat_history.{user_id}", None)
-            # await asyncio.sleep(0.02) # Removed deletion
-            # await message.delete() # Removed deletion
             return
 
         if len(parts) > role_text_index:
@@ -787,8 +720,6 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
                     db.set(collection, f"custom_roles.{user_id}", secondary_role)
                 await client.send_message("me", f"Custom secondary role set for user {user_id}:\n{secondary_role}")
                 db.set(collection, f"chat_history.{user_id}", None)
-                # await asyncio.sleep(0.02) # Removed deletion
-                # await message.delete() # Removed deletion
                 return
 
         # Toggle between roles for an individual user.
@@ -800,10 +731,7 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
             db.set(collection, f"custom_roles.{user_id}", primary_role)
             await client.send_message("me", f"Switched back to primary role for user {user_id}:\n{primary_role}")
         db.set(collection, f"chat_history.{user_id}", None)
-        # await asyncio.sleep(0.02) # Removed deletion
-        # await message.delete() # Removed deletion
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in the `rolex` command:\n\n{str(e)}")
         await client.send_message("me", f"An error occurred in the `rolex` command:\n\n{str(e)}")
 
 @Client.on_message(filters.command("setgkey", prefix) & filters.me)
@@ -818,17 +746,14 @@ async def set_gemini_key(client: Client, message: Message):
         if subcommand == "add" and key:
             gemini_keys.append(key)
             db.set(collection, "gemini_keys", gemini_keys)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] New Gemini API key added.")
             await message.edit_text("New Gemini API key added successfully!")
         elif subcommand == "set" and key:
             index = int(key) - 1
             if 0 <= index < len(gemini_keys):
                 current_key_index = index
                 db.set(collection, "current_key_index", current_key_index)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Current Gemini API key set to index {key}.")
                 await message.edit_text(f"Current Gemini API key set to key {key}.")
             else:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid key index {key} for setgkey set.")
                 await message.edit_text(f"Invalid key index: {key}.")
         elif subcommand == "del" and key:
             index = int(key) - 1
@@ -841,25 +766,19 @@ async def set_gemini_key(client: Client, message: Message):
                 if current_key_index >= len(gemini_keys):
                     current_key_index = max(0, len(gemini_keys) - 1)
                     db.set(collection, "current_key_index", current_key_index)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Gemini API key {key} deleted. Key was: {deleted_key[:5]}... (first 5 chars).")
                 await message.edit_text(f"Gemini API key {key} deleted successfully!")
             else:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid key index {key} for setgkey del.")
                 await message.edit_text(f"Invalid key index: {key}.")
         else:
             keys_list = "\n".join(
                 [f"{i + 1}. {key[:10]}..." for i, key in enumerate(gemini_keys)] # Show only first 10 chars of key
             )
             current_key_display = gemini_keys[current_key_index][:10] + "..." if gemini_keys else "None"
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Displaying Gemini API keys. Current: {current_key_display}.")
             await message.edit_text(
                 f"<b>Gemini API keys:</b>\n\n<code>{keys_list or 'No keys added.'}</code>\n\n<b>Current key:</b> <code>{current_key_display}</code>"
             )
 
-        # Removed: await asyncio.sleep(1)
-        # Removed: await message.delete()
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in the `setgkey` command:\n\n{str(e)}")
         await client.send_message("me", f"An error occurred in the `setgkey` command:\n\n{str(e)}")
 
 
@@ -880,13 +799,11 @@ async def set_gemini_model(client: Client, message: Message):
             new_model = parts[2].strip()
             default_gmodel_name = new_model
             db.set(collection, "default_gmodel_name", default_gmodel_name)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Default model set to: {default_gmodel_name}")
             await message.edit_text(f"<b>Default model set to:</b> <code>{default_gmodel_name}</code>")
         elif command == "secondary" and len(parts) > 2:
             new_model = parts[2].strip()
             secondary_gmodel_name = new_model
             db.set(collection, "secondary_gmodel_name", secondary_gmodel_name)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Secondary model set to: {secondary_gmodel_name}")
             await message.edit_text(f"<b>Secondary model set to:</b> <code>{secondary_gmodel_name}</code>")
         elif command == "show":
             await message.edit_text(
@@ -899,11 +816,8 @@ async def set_gemini_model(client: Client, message: Message):
                 f"<b>Usage:</b> {prefix}setgmodel `default <model_name>` | `secondary <model_name>` | `show`"
             )
         
-        # Removed: await asyncio.sleep(1)
-        # Removed: await message.delete()
 
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in the `setgmodel` command:\n\n{str(e)}")
         await client.send_message(
             "me", f"An error occurred in the `setgmodel` command:\n\n{str(e)}"
         )
@@ -946,11 +860,8 @@ async def show_api_status(client: Client, message: Message):
                 usage_report += "\n" # Add a newline after each key's models
         
         await message.edit_text(usage_report)
-        # Removed: await asyncio.sleep(10)
-        # Removed: await message.delete()
 
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ An error occurred in the `gstatus` command:\n\n{str(e)}")
         await client.send_message(
             "me", f"An error occurred in the `gstatus` command:\n\n{str(e)}"
         )
