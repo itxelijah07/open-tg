@@ -81,8 +81,7 @@ disabled_topics = db.get(collection, "disabled_topics") or []
 wchat_for_all_groups = db.get(collection, "wchat_for_all_groups") or {}
 group_roles = db.get(collection, "group_roles") or {}
 
-# List of random smileys
-smileys = ["-.-", "):", ":)", "*.*", ")*"]
+
 
 def get_chat_history(topic_id, bot_role, user_message, user_name):
     chat_history = db.get(collection, f"chat_history.{topic_id}") or [
@@ -251,25 +250,6 @@ async def handle_voice_message(client, chat_id, bot_response, thread_id=None):
                 await client.send_message(chat_id, bot_response)
             return True
     return False
-
-@Client.on_message(filters.sticker & filters.group & ~filters.me, group=3)
-async def handle_sticker(client: Client, message: Message):
-    try:
-        group_id = str(message.chat.id)
-        thread_id_str = str(message.message_thread_id) if message.message_thread_id else "0"
-        topic_id = f"{group_id}:{thread_id_str}"
-        if topic_id in disabled_topics or (
-            not wchat_for_all_groups.get(group_id, False)
-            and topic_id not in enabled_topics
-        ):
-            return
-        random_smiley = random.choice(smileys)
-        await asyncio.sleep(random.uniform(5, 10))
-        await message.reply_text(random_smiley)
-    except Exception as e:
-        await client.send_message(
-            "me", f"❌ An error occurred in the `handle_sticker` function:\n\n{str(e)}"
-        )
 
 # Persistent Queue Helper Functions for Group Topics
 def load_group_message_queue(topic_id):
