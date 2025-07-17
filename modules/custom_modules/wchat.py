@@ -300,21 +300,34 @@ async def process_group_messages(client, message, topic_id, user_name):
             await asyncio.sleep(delay)
 
             batch = []
+            # Pop up to 2 messages to form a batch
             for _ in range(2):
                 if group_message_queues[topic_id]:
                     batch.append(group_message_queues[topic_id].popleft())
 
             if not batch:
-                break
+                break # No messages left in the batch, exit loop
 
             combined_message = " ".join(batch)
+            # Clear the persistent queue after processing the batch
             clear_group_message_queue(topic_id)
 
+            # --- Determine bot role (text) and Gemini model to use ---
             bot_role = db.get(collection, f"custom_roles.{topic_id}") or group_roles.get(topic_id.split(":")[0]) or default_bot_role
-            effective_secondary_role_text = db.get(collection, f"custom_secondary_roles.{topic_id}") or \
-                                           db.get(collection, f"custom_secondary_roles.{message.chat.id}") or \
-                                           default_secondary_role
-            model_to_use = SECONDARY_GEMINI_MODEL if bot_role == effective_secondary_role_text else PRIMARY_GEMINI_MODEL
+
+            # Get the effective secondary role text for comparison
+            effective_secondary_role_text = db.get(collection, f"custom_secondary_roles.{topic_id}")
+            if effective_secondary_role_text is None:
+                effective_secondary_role_text = db.get(collection, f"custom_secondary_roles.{message.chat.id}") # Check group secondary role
+            if effective_secondary_role_text is None:
+                effective_secondary_role_text = default_secondary_role # Fallback to default secondary role
+
+            # Choose the Gemini model based on the active bot_role text
+            if bot_role == effective_secondary_role_text:
+                model_to_use = SECONDARY_GEMINI_MODEL
+            else:
+                model_to_use = PRIMARY_GEMINI_MODEL
+            # --- End Model Determination ---
 
             full_prompt = build_gemini_prompt(bot_role, get_chat_history(topic_id, bot_role, combined_message, user_name), combined_message)
 
@@ -325,44 +338,54 @@ async def process_group_messages(client, message, topic_id, user_name):
             max_length = 200
 
             try:
+                # Pass the determined model_to_use
                 model = await _get_gemini_model_with_retries(topic_id, model_to_use)
+
                 attempts = 0
                 while attempts < max_attempts:
                     response = model.start_chat().send_message(full_prompt)
-                    bot_response = response.text.strip()
-                    if len(bot_response) <= max_length:
-                        chat_history_list = get_chat_history(topic_id, bot_role, combined_message, user_name)
+                    bot_response = response.text.strip() if response and hasattr(response, 'text') else ""
+                    if bot_response and len(bot_response) <= max_length:
+                        chat_history_list = get_chat_history(topic_id, bot_role, combined_message, user_name) # Re-fetch updated history
                         chat_history_list.append(bot_response)
                         db.set(collection, f"chat_history.{topic_id}", chat_history_list)
                         break
                     attempts += 1
                 else:
-                    bot_response = bot_response[:max_length] + "..." if len(bot_response) > max_length else bot_response
-                    chat_history_list = get_chat_history(topic_id, bot_role, combined_message, user_name)
+                    if bot_response:
+                        bot_response = bot_response[:max_length] + "..." # Truncate if too long
+                    else:
+                        bot_response = "Sorry, I couldn't process that. Can you try again?" # Fallback response
+                    chat_history_list = get_chat_history(topic_id, bot_role, combined_message, user_name) # Re-fetch updated history
                     chat_history_list.append(bot_response)
                     db.set(collection, f"chat_history.{topic_id}", chat_history_list)
 
-            except ValueError as ve:
+            except ValueError as ve: # Catch specific error from _get_gemini_model_with_retries (e.g., no keys)
                 await client.send_message("me", f"❌ Failed to get Gemini model for topic {topic_id}: {ve}")
-                break
-            except Exception as e:
+                break # Break out of processing loop if no model can be obtained
+            except Exception as e: # Catch other errors during message generation
                 await client.send_message("me", f"❌ Error generating response for topic {topic_id}: {str(e)}")
-                break
+                break # Break out of processing loop on other errors
 
-            if not bot_response:
-                continue
+            if not bot_response or not isinstance(bot_response, str) or bot_response.strip() == "":
+                bot_response = "Sorry, I couldn't process that. Can you try again?" # Fallback response
+                await client.send_message(
+                    "me",
+                    f"❌ Invalid or empty bot_response for topic {topic_id}. Using fallback response."
+                )
 
             if await handle_voice_message(client, message.chat.id, bot_response, message.message_thread_id):
                 continue
 
+            # Simulate typing action for a more human-like response delay
             response_length = len(bot_response)
-            char_delay = 0.03
+            char_delay = 0.03 # Delay per character
             total_delay = response_length * char_delay
 
             elapsed_time = 0
             while elapsed_time < total_delay:
                 await send_typing_action(client, message.chat.id, bot_response)
-                await asyncio.sleep(2)
+                await asyncio.sleep(2) # Send typing action every 2 seconds
                 elapsed_time += 2
 
             await client.send_message(
@@ -371,10 +394,13 @@ async def process_group_messages(client, message, topic_id, user_name):
                 message_thread_id=message.message_thread_id,
             )
 
+        # Ensure active_topics is cleaned up when the queue is empty
         active_topics.discard(topic_id)
     except Exception as e:
+        # Critical error in processing group messages, send to saved messages
         await client.send_message("me", f"❌ Critical error in `process_group_messages` for topic {topic_id}: {str(e)}")
-        active_topics.discard(topic_id)
+        active_topics.discard(topic_id) # Ensure cleanup even on outer exceptions
+
 
 @Client.on_message(filters.group & ~filters.me, group=2)
 async def handle_files(client: Client, message: Message):
