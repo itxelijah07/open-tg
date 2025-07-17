@@ -794,7 +794,7 @@ async def set_wmodel(client: Client, message: Message):
         parts = message.text.strip().split()
         if len(parts) < 2:
             await message.edit_text(
-                f"<b>Usage:</b> {prefix}setwmodel `default <model_name>` | `secondary <model_name>` | `show`"
+                f"<b>Usage:</b> {prefix}setwmodel `primary <model_name>` | `secondary <model_name>` | `show`"
             )
             return
 
@@ -802,7 +802,7 @@ async def set_wmodel(client: Client, message: Message):
         if subcommand == "show":
             await message.edit_text(
                 f"<b>Current Gemini Models:</b>\n"
-                f"Default Model: <code>{default_gmodel_name}</code>\n"
+                f"Primary Model: <code>{primary_gmodel_name}</code>\n"
                 f"Secondary Model: <code>{secondary_gmodel_name}</code>"
             )
             return
@@ -812,9 +812,9 @@ async def set_wmodel(client: Client, message: Message):
             return
 
         model_name = parts[2].strip()
-        if subcommand == "default":
-            db.set(collection, "default_gmodel_name", model_name)
-            await message.edit_text(f"Default model set to <code>{model_name}</code>.")
+        if subcommand == "primary":
+            db.set(collection, "primary_gmodel_name", model_name)
+            await message.edit_text(f"primary model set to <code>{model_name}</code>.")
         elif subcommand == "secondary":
             db.set(collection, "secondary_gmodel_name", model_name)
             await message.edit_text(f"Secondary model set to <code>{model_name}</code>.")
