@@ -7,6 +7,7 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 import datetime
 import pytz
+from datetime import datetime
 from utils.config import gemini_key
 from utils.db import db
 from utils.misc import modules_help, prefix
@@ -58,8 +59,6 @@ def get_chat_history(user_id, bot_role, user_message, user_name):
 
 
 # --- Utility function to build Gemini prompt ---
-import pytz
-from datetime import datetime
 
 def build_gemini_prompt(bot_role, chat_history_list, user_message, file_description=None):
     """
