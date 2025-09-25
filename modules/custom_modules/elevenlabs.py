@@ -1,15 +1,19 @@
 import os
 import httpx
 import subprocess
+import logging
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 from utils.misc import modules_help, prefix
 from utils.db import db
 import google.generativeai as genai
 
+# Suppress noisy gRPC logs from the google-generativeai library
+logging.getLogger('grpc._cython.cygrpc').setLevel(logging.ERROR)
+
 # Configure the Gemini API with your key
-genai.configure(api_key="YOUR_GEMINI_API_KEY")  # Replace with your key
-gemini_model = genai.GenerativeModel("gemini-pro")
+genai.configure(api_key="AIzaSyC1-5hrYIdfNsg2B7bcb5Qs3ib1MIWlbOE")  # Replace with your key
+gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 async def rewrite_text_with_gemini(text: str, forced_tone: str = None) -> str:
     """Rewrites text using the Gemini API to sound more natural or adopt a specific tone."""
@@ -321,3 +325,4 @@ modules_help["elevenlabs"] = {
     "set_el set <num>": "Set the active API key.",
     "set_el <param> <value>": "Set a specific parameter (e.g., `voice_id`, `stability`).",
 }
+
