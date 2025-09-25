@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 # --- Gemini AI Initialization ---
 genai = import_library("google.generativeai", "google-generativeai")
+
 safety_settings = [
     {"category": cat, "threshold": "BLOCK_NONE"}
     for cat in [
@@ -32,7 +33,6 @@ safety_settings = [
         "HARM_CATEGORY_HARASSMENT",
         "HARM_CATEGORY_HATE_SPEECH",
         "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-        "HARM_CATEGORY_UNSPECIFIED",
     ]
 ]
 
