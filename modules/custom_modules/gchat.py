@@ -634,25 +634,46 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
         await client.send_message("me", f"An error occurred in the `rolex` command:\n\n{str(e)}")
 
 # --- NEW COMMAND: Renamed from switchdefault to roleswitch ---
+# --- NEW POWERFUL .roleswitch COMMAND ---
 @Client.on_message(filters.command("roleswitch", prefix) & filters.me)
 async def role_switch_command(client: Client, message: Message):
     try:
-        # Get the current active default role, defaulting to "primary" if not set
-        current_default = db.get(collection, "active_default_role") or "primary"
-
-        # Switch to the other role
-        if current_default == "primary":
-            new_default = "secondary"
-        else:
-            new_default = "primary"
+        updated_users_count = 0
         
-        # Save the new setting to the database
-        db.set(collection, "active_default_role", new_default)
+        # 1. Determine the old and new roles
+        current_default_state = db.get(collection, "active_default_role") or "primary"
+        
+        if current_default_state == "primary":
+            new_default_state = "secondary"
+            old_default_role_text = default_bot_role
+            new_default_role_text = default_secondary_role
+        else:
+            new_default_state = "primary"
+            old_default_role_text = default_secondary_role
+            new_default_role_text = default_bot_role
 
-        await message.edit_text(f"✅ **Default role switched to `{new_default.title()}`.**\n\nNew users will now start with this role.")
+        # 2. Loop through all known users to update them
+        all_user_ids = set(enabled_users + disabled_users)
+        for user_id in all_user_ids:
+            # Get the user's current active role
+            current_user_role = db.get(collection, f"custom_roles.{user_id}") or default_bot_role
+            
+            # If their role matches the OLD default, update them to the NEW default
+            if current_user_role == old_default_role_text:
+                db.set(collection, f"custom_roles.{user_id}", new_default_role_text)
+                db.set(collection, f"chat_history.{user_id}", None) # Clear history for a fresh start
+                updated_users_count += 1
+        
+        # 3. Set the new global default for future users
+        db.set(collection, "active_default_role", new_default_state)
+
+        await message.edit_text(
+            f"✅ **Default role switched to `{new_default_state.title()}`.**\n\n"
+            f"Updated **{updated_users_count}** existing users to the new default."
+        )
+
     except Exception as e:
         await message.edit_text(f"An error occurred: {e}")
-
 @Client.on_message(filters.command("setgkey", prefix) & filters.me)
 async def set_gemini_key(client: Client, message: Message):
     try:
