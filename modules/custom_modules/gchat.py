@@ -91,15 +91,25 @@ User Current Message:
     return prompt
 
 
-
-async def generate_gemini_response(input_data, chat_history, user_id):
-    retries = 3
+# MODIFIED SECTION: generate_gemini_response
+async def generate_gemini_response(client, input_data, chat_history, user_id):
+    """
+    Generates a response from Gemini, handling API key rotation.
+    Sends a notification if all keys fail.
+    """
     gemini_keys = db.get(collection, "gemini_keys") or [gemini_key]
-    current_key_index = db.get(collection, "current_key_index") or 0
+    if not gemini_keys:
+        await client.send_message("me", "Error: No Gemini API keys configured.")
+        return None
 
-    while retries > 0:
+    current_key_index = db.get(collection, "current_key_index") or 0
+    num_keys = len(gemini_keys)
+
+    for attempt in range(num_keys):
+        key_index_to_try = (current_key_index + attempt) % num_keys
+        current_key = gemini_keys[key_index_to_try]
+        
         try:
-            current_key = gemini_keys[current_key_index]
             genai.configure(api_key=current_key)
             model = genai.GenerativeModel("gemini-2.0-flash")
             model.safety_settings = safety_settings
@@ -109,15 +119,25 @@ async def generate_gemini_response(input_data, chat_history, user_id):
 
             chat_history.append(bot_response)
             db.set(collection, f"chat_history.{user_id}", chat_history)
+            
+            # Success! Update the key index and return the response.
+            db.set(collection, "current_key_index", key_index_to_try)
             return bot_response
+
         except Exception as e:
-            if "429" in str(e) or "invalid" in str(e).lower():
-                retries -= 1
-                current_key_index = (current_key_index + 1) % len(gemini_keys)
-                db.set(collection, "current_key_index", current_key_index)
-                await asyncio.sleep(4)
+            error_str = str(e).lower()
+            if "429" in error_str or "invalid" in error_str:
+                # Key failed, try the next one.
+                await asyncio.sleep(2)
+                continue
             else:
-                raise e
+                # Unexpected error.
+                await client.send_message("me", f"An unexpected Gemini error occurred in file handler: {str(e)}")
+                return None # Stop trying on other errors
+
+    # If the loop completes without returning, all keys have failed.
+    await client.send_message("me", "limit exceed of alll keys haha")
+    return None
 
 
 async def upload_file_to_gemini(file_path, file_type):
@@ -211,6 +231,7 @@ async def gchat(client: Client, message: Message):
         await client.send_message("me", f"An error occurred in `gchat`: {str(e)}")
 
 
+# MODIFIED SECTION: process_messages
 async def process_messages(client, message, user_id, user_name):
     try:
         while user_message_queues[user_id]:  # Keep processing until queue is empty
@@ -218,7 +239,7 @@ async def process_messages(client, message, user_id, user_name):
             await asyncio.sleep(delay)
 
             batch = []
-            for _ in range(3):  # Process up to 2 messages in one batch
+            for _ in range(3):  # Process up to 3 messages in one batch
                 if user_message_queues[user_id]:
                     batch.append(user_message_queues[user_id].popleft())
 
@@ -241,89 +262,98 @@ async def process_messages(client, message, user_id, user_name):
             else:
                 limited_history = chat_history_list  # Send full history if no limit is set
 
-
-
             # Construct the prompt using the (possibly limited) chat history
             full_prompt = build_gemini_prompt(bot_role, limited_history, combined_message)
 
             await send_typing_action(client, message.chat.id, combined_message)
 
             gemini_keys = db.get(collection, "gemini_keys") or [gemini_key]
-            current_key_index = db.get(collection, "current_key_index") or 0
-            retries = len(gemini_keys) * 2
-            max_attempts = 5
-            max_length = 200
+            if not gemini_keys:
+                await client.send_message("me", "Error: No Gemini API keys configured.")
+                break
 
-            while retries > 0:
+            current_key_index = db.get(collection, "current_key_index") or 0
+            num_keys = len(gemini_keys)
+            bot_response = None  # Flag to check for success
+
+            for attempt in range(num_keys):
+                key_index_to_try = (current_key_index + attempt) % num_keys
+                current_key = gemini_keys[key_index_to_try]
+                
                 try:
-                    current_key = gemini_keys[current_key_index]
                     genai.configure(api_key=current_key)
                     model = genai.GenerativeModel("gemini-2.0-flash")
                     model.safety_settings = safety_settings
 
-                    attempts = 0
-                    bot_response = ""
-
-                    while attempts < max_attempts:
+                    # Inner loop for length check
+                    max_attempts = 5
+                    max_length = 200
+                    gen_attempts = 0
+                    
+                    while gen_attempts < max_attempts:
                         response = model.start_chat().send_message(full_prompt)
-                        bot_response = response.text.strip()
-                        if len(bot_response) <= max_length:
-                            chat_history_list.append(bot_response)
-                            db.set(collection, f"chat_history.{user_id}", chat_history_list)
+                        temp_response = response.text.strip()
+                        if len(temp_response) <= max_length:
+                            bot_response = temp_response
                             break
-                        attempts += 1
-                        if attempts < max_attempts:
-                            await client.send_message(
-                                "me", f"Retrying response generation for user: {user_id} due to long response."
-                            )
+                        gen_attempts += 1
+                        if gen_attempts < max_attempts:
+                             await client.send_message("me", f"Retrying response generation for user: {user_id} due to long response.")
+                    
+                    if not bot_response:
+                        await client.send_message("me", f"Failed to generate a suitable response after {max_attempts} attempts for user: {user_id}")
+                        continue # This key failed (couldn't get short response), try next key.
 
-                    if attempts == max_attempts:
-                        await client.send_message(
-                            "me",
-                            f"Failed to generate a suitable response after {max_attempts} attempts for user: {user_id}",
-                        )
-                        break
-
-                    if await handle_voice_message(client, message.chat.id, bot_response):
-                        break
-
-                    # Simulate typing delay based on response length
-                    response_length = len(bot_response)
-                    char_delay = 0.03
-                    total_delay = response_length * char_delay
-
-                    elapsed_time = 0
-                    while elapsed_time < total_delay:
-                        await send_typing_action(client, message.chat.id, bot_response)
-                        await asyncio.sleep(2)
-                        elapsed_time += 2
-
-                    await message.reply_text(bot_response)
-                    break
+                    # SUCCESS!
+                    db.set(collection, "current_key_index", key_index_to_try) # Save the working key
+                    break # Break out of the key rotation loop
 
                 except Exception as e:
-                    if "429" in str(e) or "invalid" in str(e).lower():
-                        retries -= 1
-                        if retries % 2 == 0:
-                            current_key_index = (current_key_index + 1) % len(gemini_keys)
-                            db.set(collection, "current_key_index", current_key_index)
-                            await asyncio.sleep(4)
+                    error_str = str(e).lower()
+                    if "429" in error_str or "invalid" in error_str:
+                        # Key is rate-limited or invalid. The loop will try the next one.
+                        await asyncio.sleep(2)
+                        continue
                     else:
-                        raise e
+                        # Some other error occurred. Report it and stop trying.
+                        await client.send_message("me", f"An unexpected Gemini error stopped key rotation: {str(e)}")
+                        bot_response = None
+                        break
+            
+            # After the loop, check if we got a response.
+            if bot_response:
+                # Success, proceed to send the message
+                chat_history_list.append(bot_response)
+                db.set(collection, f"chat_history.{user_id}", chat_history_list)
+                
+                if await handle_voice_message(client, message.chat.id, bot_response):
+                    continue # To the next message in the user's queue
+                
+                # Simulate typing delay based on response length
+                response_length = len(bot_response)
+                char_delay = 0.03
+                total_delay = response_length * char_delay
+                elapsed_time = 0
+                while elapsed_time < total_delay:
+                    await send_typing_action(client, message.chat.id, bot_response)
+                    await asyncio.sleep(2)
+                    elapsed_time += 2
 
-        # Once all messages are processed, remove from active_users
-        active_users.discard(user_id)
+                await message.reply_text(bot_response)
+            else:
+                # This means the loop completed without a successful response, implying all keys failed.
+                await client.send_message("me", "limit exceed of alll keys haha")
 
     except Exception as e:
         await client.send_message("me", f"An error occurred in `process_messages`: {str(e)}")
-    finally:  # <-  Make sure there is a `finally` block here
-        active_users.discard(user_id)  # Ensure user is removed from active list in case of error
+    finally:
+        active_users.discard(user_id)
 
 
-        
 ###################################################################################################
 
 
+# MODIFIED SECTION: handle_files
 @Client.on_message(filters.private & ~filters.me & ~filters.bot, group=2)
 async def handle_files(client: Client, message: Message):
     file_path = None
@@ -369,10 +399,11 @@ async def handle_files(client: Client, message: Message):
 
                         input_data = [full_prompt] + sample_images
                         response = await generate_gemini_response(
-                            input_data, chat_history_list, user_id
+                            client, input_data, chat_history_list, user_id
                         )
-
-                        await message.reply_text(response, reply_to_message_id=message.id)
+                        # Only reply if a response was successfully generated
+                        if response:
+                            await message.reply_text(response, reply_to_message_id=message.id)
 
                     except Exception as e_image_process:
                         await client.send_message(
@@ -410,9 +441,11 @@ async def handle_files(client: Client, message: Message):
 
                 input_data = [full_prompt, uploaded_file]
                 response = await generate_gemini_response(
-                    input_data, chat_history_list, user_id
+                    client, input_data, chat_history_list, user_id
                 )
-                return await message.reply_text(response, reply_to_message_id=message.id)
+                # Only reply if a response was successfully generated
+                if response:
+                    return await message.reply_text(response, reply_to_message_id=message.id)
 
             except Exception as e_file_process:
                 await client.send_message(
