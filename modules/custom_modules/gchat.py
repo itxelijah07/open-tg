@@ -56,12 +56,12 @@ def get_chat_history(user_id, bot_role, user_message, user_name):
 
 # --- Utility function to build Gemini prompt ---
 def build_gemini_prompt(bot_role, chat_history_list, user_message, file_description=None):
-    pakistan_timezone = pytz.timezone('Asia/Karachi')
-    timestamp = datetime.now(pakistan_timezone).strftime("%Y-%m-%d %I:%M:%S %p %Z")
+    phoenix_timezone = pytz.timezone('America/Phoenix')
+    timestamp = datetime.now(phoenix_timezone).strftime("%Y-%m-%d %I:%M:%S %p %Z")
     
     chat_history_text = "\n".join(chat_history_list) if chat_history_list else "No previous chat history."
     prompt = f"""
-Current Time: {timestamp} in Kahror Pakka, Punjab, Pakistan
+Current Time: {timestamp} in Phoenix, Arizona
 Role:
 {bot_role}
 Chat History:
@@ -235,14 +235,19 @@ async def handle_files(client: Client, message: Message):
 @Client.on_message(filters.command(["gchat", "gc"], prefix) & filters.me)
 async def gchat_command(client: Client, message: Message):
     global gchat_for_all
+    text = ""
     try:
         parts = message.text.strip().split()
         if len(parts) < 2:
-            await message.edit_text(f"<b>Usage:</b> {prefix}gchat [on|off|del|dell all|all|history [number|off]] [user_id]")
+            text = f"<b>Usage:</b> {prefix}gchat [on|off|del|dell all|all|history [number|off]] [user_id]"
+            await client.send_message("me", text)
+            await message.delete()
             return
 
         command = parts[1].lower()
-        user_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else message.chat.id
+        user_id_str = parts[2] if len(parts) > 2 else str(message.chat.id)
+        user_id = int(user_id_str) if user_id_str.isdigit() else message.chat.id
+
 
         if command == "on":
             if user_id in disabled_users:
@@ -251,7 +256,7 @@ async def gchat_command(client: Client, message: Message):
             if user_id not in enabled_users:
                 enabled_users.append(user_id)
                 db.set(collection, "enabled_users", enabled_users)
-            await message.edit_text(f"<b>gchat is enabled for user {user_id}.</b>")
+            text = f"<b>gchat is enabled for user {user_id}.</b>"
         elif command == "off":
             if user_id not in disabled_users:
                 disabled_users.append(user_id)
@@ -259,66 +264,72 @@ async def gchat_command(client: Client, message: Message):
             if user_id in enabled_users:
                 enabled_users.remove(user_id)
                 db.set(collection, "enabled_users", enabled_users)
-            await message.edit_text(f"<b>gchat is disabled for user {user_id}.</b>")
+            text = f"<b>gchat is disabled for user {user_id}.</b>"
         elif command == "del":
             db.set(collection, f"chat_history.{user_id}", None)
-            await message.edit_text(f"<b>Chat history deleted for user {user_id}.</b>")
+            text = f"<b>Chat history deleted for user {user_id}.</b>"
         elif command == "dell" and len(parts) > 2 and parts[2].lower() == "all":
             all_users = set(enabled_users + disabled_users)
             for uid in all_users:
                 db.set(collection, f"chat_history.{uid}", None)
-            await message.edit_text("<b>Chat history deleted for all users.</b>")
+            text = "<b>Chat history deleted for all users.</b>"
         elif command == "all":
             gchat_for_all = not gchat_for_all
             db.set(collection, "gchat_for_all", gchat_for_all)
             status = "enabled" if gchat_for_all else "disabled"
-            await message.edit_text(f"gchat is now {status} for all users.")
+            text = f"gchat is now {status} for all users."
         elif command == "history":
             if len(parts) >= 3:
                 if parts[2].lower() == "off":
                     db.set(collection, "history_limit", None)
-                    await message.edit_text("History limit disabled. Now sending full chat history.")
+                    text = "History limit disabled. Now sending full chat history."
                 else:
                     try:
                         num = int(parts[2])
                         db.set(collection, "history_limit", num)
-                        await message.edit_text(f"Global history limit set to last {num} messages.")
+                        text = f"Global history limit set to last {num} messages."
                     except ValueError:
-                        await message.edit_text("Invalid number for history limit.")
+                        text = "Invalid number for history limit."
             else:
-                 await message.edit_text(f"<b>Usage:</b> {prefix}gchat history [number|off]")
+                 text = f"<b>Usage:</b> {prefix}gchat history [number|off]"
+        
+        if text:
+            await client.send_message("me", text)
+        await message.delete()
     except Exception as e:
-        await message.edit_text(f"An error occurred in gchat command: {str(e)}")
+        await client.send_message("me", f"An error occurred in gchat command: {str(e)}")
+        await message.delete()
 
 @Client.on_message(filters.command("role", prefix) & filters.me)
 async def set_custom_role(client: Client, message: Message):
+    text = ""
     try:
         parts = message.text.strip().split()
         user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else message.chat.id
         custom_role = " ".join(parts[2:]).strip()
 
         if not custom_role:
-            # Unpin the user by deleting their specific role
             db.set(collection, f"custom_roles.{user_id}", None)
-            db.set(collection, f"chat_history.{user_id}", None) # Clear history
-            await message.edit_text(f"✅ User `{user_id}` has been unpinned and will now follow the default role.")
+            db.set(collection, f"chat_history.{user_id}", None)
+            text = f"User `{user_id}` has been unpinned and will now follow the default role."
         else:
-            # Pin the user to a new custom role
             db.set(collection, f"custom_roles.{user_id}", custom_role)
-            db.set(collection, f"chat_history.{user_id}", None) # Clear history
-            await message.edit_text(f"✅ User `{user_id}` has been pinned to a new custom role.")
+            db.set(collection, f"chat_history.{user_id}", None)
+            text = f"User `{user_id}` has been pinned to a new custom role."
+        
+        await client.send_message("me", text)
+        await message.delete()
     except Exception as e:
-        await message.edit_text(f"An error occurred: {str(e)}")
+        await client.send_message("me", f"An error occurred in role command: {str(e)}")
+        await message.delete()
 
 @Client.on_message(filters.command("rolex", prefix) & filters.me)
 async def toggle_or_reset_secondary_role(client: Client, message: Message):
+    text = ""
     try:
         parts = message.text.strip().split()
         
-        if len(parts) >= 2 and parts[1].isdigit():
-            user_id = int(parts[1])
-        else:
-            user_id = message.chat.id
+        user_id = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else message.chat.id
 
         current_role = db.get(collection, f"custom_roles.{user_id}")
         
@@ -326,18 +337,21 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
             role_text_index = 2 if (len(parts) > 2 and parts[1].isdigit()) else 1
             secondary_role_text = " ".join(parts[role_text_index:]).strip()
             db.set(collection, f"custom_roles.{user_id}", secondary_role_text)
-            db.set(collection, f"chat_history.{user_id}", None)
-            await message.edit_text(f"✅ User `{user_id}` has been pinned to a new secondary role.")
+            text = f"User `{user_id}` has been pinned to a new secondary role."
         else:
             if current_role == default_bot_role:
                 db.set(collection, f"custom_roles.{user_id}", default_secondary_role)
-                await message.edit_text(f"✅ User `{user_id}` has been pinned to the default secondary role.")
+                text = f"User `{user_id}` has been pinned to the default secondary role."
             else:
                 db.set(collection, f"custom_roles.{user_id}", default_bot_role)
-                await message.edit_text(f"✅ User `{user_id}` has been pinned to the default primary role.")
-            db.set(collection, f"chat_history.{user_id}", None)
+                text = f"User `{user_id}` has been pinned to the default primary role."
+        
+        db.set(collection, f"chat_history.{user_id}", None)
+        await client.send_message("me", text)
+        await message.delete()
     except Exception as e:
-        await message.edit_text(f"An error occurred: {str(e)}")
+        await client.send_message("me", f"An error occurred in rolex command: {str(e)}")
+        await message.delete()
 
 
 @Client.on_message(filters.command("roleswitch", prefix) & filters.me)
@@ -346,59 +360,68 @@ async def role_switch_command(client: Client, message: Message):
         current_default = db.get(collection, "active_default_role") or "primary"
         new_default = "secondary" if current_default == "primary" else "primary"
         db.set(collection, "active_default_role", new_default)
-        await message.edit_text(
-            f"✅ **Default role switched to `{new_default.title()}`.**\n\n"
+        
+        text = (
+            f"**Default role switched to `{new_default.title()}`.**\n\n"
             f"All default users will now use this role instantly."
         )
+        await client.send_message("me", text)
+        await message.delete()
     except Exception as e:
-        await message.edit_text(f"An error occurred: {e}")
+        await client.send_message("me", f"An error occurred in roleswitch command: {e}")
+        await message.delete()
 
 @Client.on_message(filters.command("setgkey", prefix) & filters.me)
 async def set_gemini_key(client: Client, message: Message):
+    text = ""
     try:
         command = message.text.strip().split()
         subcommand = command[1] if len(command) > 1 else None
         key = command[2] if len(command) > 2 else None
 
         gemini_keys = db.get(collection, "gemini_keys") or []
-        current_key_index = db.get(collection, "current_key_index") or 0
-
+        
         if subcommand == "add" and key:
             gemini_keys.append(key)
             db.set(collection, "gemini_keys", gemini_keys)
-            await message.edit_text("New Gemini API key added successfully!")
+            text = "New Gemini API key added successfully!"
         elif subcommand == "set" and key:
             try:
                 index = int(key) - 1
                 if 0 <= index < len(gemini_keys):
                     db.set(collection, "current_key_index", index)
-                    await message.edit_text(f"Current Gemini API key set to key {index + 1}.")
+                    text = f"Current Gemini API key set to key {index + 1}."
                 else:
-                    await message.edit_text(f"Invalid key index.")
+                    text = "Invalid key index."
             except ValueError:
-                await message.edit_text("Invalid index. Please provide a number.")
+                text = "Invalid index. Please provide a number."
         elif subcommand == "del" and key:
             try:
                 index = int(key) - 1
                 if 0 <= index < len(gemini_keys):
+                    current_key_index = db.get(collection, "current_key_index") or 0
                     del gemini_keys[index]
                     db.set(collection, "gemini_keys", gemini_keys)
                     if current_key_index >= len(gemini_keys):
                         db.set(collection, "current_key_index", max(0, len(gemini_keys) - 1))
-                    await message.edit_text(f"Gemini API key {index + 1} deleted.")
+                    text = f"Gemini API key {index + 1} deleted."
                 else:
-                    await message.edit_text(f"Invalid key index.")
+                    text = "Invalid key index."
             except ValueError:
-                await message.edit_text("Invalid index. Please provide a number.")
+                text = "Invalid index. Please provide a number."
         else:
             keys_list = "\n".join([f"{i + 1}. {k}" for i, k in enumerate(gemini_keys)])
             current_key_num = (db.get(collection, "current_key_index") or 0) + 1
-            await message.edit_text(
+            text = (
                 f"<b>Gemini API keys:</b>\n\n<code>{keys_list or 'No keys set.'}</code>\n\n"
                 f"<b>Current key:</b> <code>{current_key_num if gemini_keys else 'N/A'}</code>"
             )
+        
+        await client.send_message("me", text)
+        await message.delete()
     except Exception as e:
-        await message.edit_text(f"An error occurred in setgkey command: {str(e)}")
+        await client.send_message("me", f"An error occurred in setgkey command: {str(e)}")
+        await message.delete()
 
 modules_help["gchat"] = {
     "gchat on/off [id]": "Enable/disable gchat for a user.",
