@@ -91,7 +91,6 @@ User Current Message:
     return prompt
 
 
-# MODIFIED SECTION: generate_gemini_response
 async def generate_gemini_response(client, input_data, chat_history, user_id):
     """
     Generates a response from Gemini, handling API key rotation.
@@ -136,6 +135,9 @@ async def generate_gemini_response(client, input_data, chat_history, user_id):
                 return None # Stop trying on other errors
 
     # If the loop completes without returning, all keys have failed.
+    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+    # <<<< CHANGE THE MESSAGE IN THE LINE BELOW FOR FILE/IMAGE HANDLER
+    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     await client.send_message("me", "limit exceed of alll keys haha")
     return None
 
@@ -231,7 +233,6 @@ async def gchat(client: Client, message: Message):
         await client.send_message("me", f"An error occurred in `gchat`: {str(e)}")
 
 
-# MODIFIED SECTION: process_messages
 async def process_messages(client, message, user_id, user_name):
     try:
         while user_message_queues[user_id]:  # Keep processing until queue is empty
@@ -342,6 +343,9 @@ async def process_messages(client, message, user_id, user_name):
                 await message.reply_text(bot_response)
             else:
                 # This means the loop completed without a successful response, implying all keys failed.
+                # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                # <<<< CHANGE THE MESSAGE IN THE LINE BELOW FOR TEXT HANDLER
+                # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
                 await client.send_message("me", "limit exceed of alll keys haha")
 
     except Exception as e:
@@ -353,7 +357,6 @@ async def process_messages(client, message, user_id, user_name):
 ###################################################################################################
 
 
-# MODIFIED SECTION: handle_files
 @Client.on_message(filters.private & ~filters.me & ~filters.bot, group=2)
 async def handle_files(client: Client, message: Message):
     file_path = None
