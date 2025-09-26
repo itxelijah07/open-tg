@@ -135,10 +135,7 @@ async def generate_gemini_response(client, input_data, chat_history, user_id):
                 return None # Stop trying on other errors
 
     # If the loop completes without returning, all keys have failed.
-    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-    # <<<< CHANGE THE MESSAGE IN THE LINE BELOW FOR FILE/IMAGE HANDLER
-    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-    await client.send_message("me", "limit exceed of alll keys haha")
+    await client.send_message("me", "All API keys have exceeded their limits.")
     return None
 
 
@@ -251,7 +248,17 @@ async def process_messages(client, message, user_id, user_name):
             clear_user_message_queue(user_id)
 
             # Retrieve chat history and bot role
-            bot_role = db.get(collection, f"custom_roles.{user_id}") or default_bot_role
+            user_specific_role = db.get(collection, f"custom_roles.{user_id}")
+            if user_specific_role:
+                bot_role = user_specific_role
+            else:
+                # No user-specific role, so check the global default switch
+                active_default = db.get(collection, "active_default_role") or "primary"
+                if active_default == "secondary":
+                    bot_role = default_secondary_role
+                else:
+                    bot_role = default_bot_role
+            
             chat_history_list = get_chat_history(user_id, bot_role, combined_message, user_name)
 
             # Get global history limit (default to None if not set)
@@ -343,10 +350,7 @@ async def process_messages(client, message, user_id, user_name):
                 await message.reply_text(bot_response)
             else:
                 # This means the loop completed without a successful response, implying all keys failed.
-                # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-                # <<<< CHANGE THE MESSAGE IN THE LINE BELOW FOR TEXT HANDLER
-                # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-                await client.send_message("me", "limit exceed of alll keys haha")
+                await client.send_message("me", "All API keys have exceeded their limits.")
 
     except Exception as e:
         await client.send_message("me", f"An error occurred in `process_messages`: {str(e)}")
@@ -365,7 +369,17 @@ async def handle_files(client: Client, message: Message):
         if user_id in disabled_users or (not gchat_for_all and user_id not in enabled_users):
             return
 
-        bot_role = db.get(collection, f"custom_roles.{user_id}") or default_bot_role
+        user_specific_role = db.get(collection, f"custom_roles.{user_id}")
+        if user_specific_role:
+            bot_role = user_specific_role
+        else:
+            # No user-specific role, so check the global default switch
+            active_default = db.get(collection, "active_default_role") or "primary"
+            if active_default == "secondary":
+                bot_role = default_secondary_role
+            else:
+                bot_role = default_bot_role
+
         caption = message.caption.strip() if message.caption else ""
         chat_history_list = get_chat_history(user_id, bot_role, caption, user_name)
 
@@ -560,38 +574,12 @@ async def set_custom_role(client: Client, message: Message):
     except Exception as e:
         await client.send_message("me", f"An error occurred in the `role` command:\n\n{str(e)}")
 
+# --- MODIFIED COMMAND: .rolex all logic is REMOVED ---
 @Client.on_message(filters.command("rolex", prefix) & filters.me)
 async def toggle_or_reset_secondary_role(client: Client, message: Message):
     try:
         parts = message.text.strip().split()
-
-        # Global force shift: ".rolex all" forces a global toggle without checking each user's current role.
-        if len(parts) >= 2 and parts[1].lower() == "all":
-            # Retrieve the global shift flag; default to "primary" if not set.
-            global_shift = db.get(collection, "global_role_shift") or "primary"
-            # Determine the new state: if currently "primary", then switch everyone to secondary, and vice versa.
-            new_state = "secondary" if global_shift == "primary" else "primary"
-            count = 0
-            for uid in set(enabled_users + disabled_users):
-                if new_state == "primary":
-                    primary_role = db.get(collection, f"custom_roles_primary.{uid}") or default_bot_role
-                    db.set(collection, f"custom_roles.{uid}", primary_role)
-                else:
-                    custom_secondary = db.get(collection, f"custom_roles_secondary.{uid}")
-                    secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
-                    db.set(collection, f"custom_roles.{uid}", secondary_role)
-                # Clear chat history for each user.
-                db.set(collection, f"chat_history.{uid}", None)
-                count += 1
-                await asyncio.sleep(0.02)
-            # Update the global flag for the next force shift.
-            db.set(collection, "global_role_shift", new_state)
-            # Update global current role for upcoming new users.
-            db.set(collection, "global_current_role", new_state)
-            await client.send_message("me", f"Force-shifted roles for {count} users to {new_state} role.")
-            await message.delete()
-            return
-
+        
         # Individual user functionality remains unchanged.
         reset_command = parts[-1].lower() == "r"
         if len(parts) >= 2 and parts[1].isdigit():
@@ -645,6 +633,25 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
     except Exception as e:
         await client.send_message("me", f"An error occurred in the `rolex` command:\n\n{str(e)}")
 
+# --- NEW COMMAND: Renamed from switchdefault to roleswitch ---
+@Client.on_message(filters.command("roleswitch", prefix) & filters.me)
+async def role_switch_command(client: Client, message: Message):
+    try:
+        # Get the current active default role, defaulting to "primary" if not set
+        current_default = db.get(collection, "active_default_role") or "primary"
+
+        # Switch to the other role
+        if current_default == "primary":
+            new_default = "secondary"
+        else:
+            new_default = "primary"
+        
+        # Save the new setting to the database
+        db.set(collection, "active_default_role", new_default)
+
+        await message.edit_text(f"✅ **Default role switched to `{new_default.title()}`.**\n\nNew users will now start with this role.")
+    except Exception as e:
+        await message.edit_text(f"An error occurred: {e}")
 
 @Client.on_message(filters.command("setgkey", prefix) & filters.me)
 async def set_gemini_key(client: Client, message: Message):
@@ -701,9 +708,10 @@ modules_help["gchat"] = {
     "gchat dell all ": "Delete the chat history for all user.",
     "gchat all": "Toggle gchat for all users globally.",
     "gchat History (limit number) /off": "Set history limit for all users globally.",
-    "role [user_id] <custom role>": "Set a custom role for the bot for the specified user or current user and clear existing chat history.",
-    "rolex [user_id] <secondary role>": "Switch to a secondary role for the specified user or current user.",
-    "rolex or [user_id]  ": "Switch to a secondary or revert role for the specified user or current user. or all users",
+    "role [user_id] <custom role>": "Set a custom role for the bot for a specific user.",
+    "rolex [user_id] <secondary role>": "Set a custom secondary role for a specific user.",
+    "rolex [user_id]": "Switch between primary and secondary roles for a specific user.",
+    "roleswitch": "Switch the global default role for new users between primary and secondary.",
     "setgkey add <key>": "Add a new Gemini API key.",
     "setgkey set <index>": "Set the current Gemini API key by index.",
     "setgkey del <index>": "Delete a Gemini API key by index.",
