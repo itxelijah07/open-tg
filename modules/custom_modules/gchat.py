@@ -15,6 +15,7 @@ from modules.custom_modules.elevenlabs import generate_elevenlabs_audio
 import time
 import pymongo
 from utils import config
+
 # Initialize Gemini AI
 genai = import_library("google.generativeai", "google-generativeai")
 safety_settings = [
@@ -38,43 +39,17 @@ you're nick a 20y old living in Phoenix. You're horny bf and you're bold wild do
 """
 
 collection = "custom.gchat"
-# Create separate database connection for API Keys
-def get_api_keys_db():
-    """Get connection to separate API Keys database"""
-    client = pymongo.MongoClient(config.db_url)
-    return client["Api Keys"]  
+
 
 # Database initialization
 enabled_users = db.get(collection, "enabled_users") or []
 disabled_users = db.get(collection, "disabled_users") or []
 gchat_for_all = db.get(collection, "gchat_for_all") or False
-mark_as_read_enabled = db.get(collection, "mark_as_read_enabled") or True
+mark_as_read_enabled = db.get(collection, "mark_as_read_enabled") or False
 
+# A single model for the entire system
+gmodel_name = db.get(collection, "gmodel_name") or "gemini-1.5-flash"
 
-# Model configuration for gchat
-default_gmodel_name = db.get(collection, "default_gmodel_name") or "gemini-2.0-flash"
-secondary_gmodel_name = db.get(collection, "secondary_gmodel_name") or "gemini-1.5-flash"
-
-# API key usage statistics
-api_key_stats = defaultdict(lambda: defaultdict(lambda: {"total_requests": 0, "successful_responses": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0}))
-
-# Helper to convert defaultdicts to dicts for saving to DB
-def _defaultdict_to_dict(d):
-    if isinstance(d, defaultdict):
-        d = dict(d)
-    for key, value in d.items():
-        if isinstance(value, defaultdict):
-            d[key] = _defaultdict_to_dict(value)
-        elif isinstance(value, dict):
-            d[key] = _defaultdict_to_dict(value)
-    return d
-
-# Load existing stats from DB
-loaded_stats = db.get(collection, "api_key_stats")
-if loaded_stats:
-    for key, model_data in loaded_stats.items():
-        for model_name, stats in model_data.items():
-            api_key_stats[key][model_name].update(stats)
 
 def get_chat_history(user_id, bot_role, user_message, user_name):
     chat_history = db.get(collection, f"chat_history.{user_id}") or [f"Role: {bot_role}"]
@@ -113,15 +88,6 @@ async def send_typing_action(client, chat_id, user_message):
     await asyncio.sleep(min(len(user_message) / 10, 5))
 
 async def _call_gemini_api(client: Client, input_data, user_id: int, model_name: str, chat_history_list: list, is_image_input: bool = False):
-    # Check for daily stats reset (UTC midnight)
-    current_utc_date = datetime.now(pytz.UTC).date()
-    last_reset = db.get(collection, "last_stats_reset")
-    if last_reset is None or last_reset != str(current_utc_date):
-        global api_key_stats
-        api_key_stats = defaultdict(lambda: defaultdict(lambda: {"total_requests": 0, "successful_responses": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0}))
-        db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
-        db.set(collection, "last_stats_reset", str(current_utc_date))
-
     gemini_keys = get_gemini_keys()
     if not gemini_keys:
         raise ValueError("No Gemini API keys configured.")
@@ -142,21 +108,10 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
 
             model = genai.GenerativeModel(model_name)
             model.safety_settings = safety_settings
-
-            api_key_stats[str(current_key_index)][model_name]["total_requests"] += 1
-            db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
-
+            
             response = model.generate_content(input_data, stream=False)
             bot_response = response.text.strip()
-
-            if hasattr(response, 'usage_metadata'):
-                usage = response.usage_metadata
-                api_key_stats[str(current_key_index)][model_name]["total_prompt_tokens"] += usage.prompt_token_count
-                api_key_stats[str(current_key_index)][model_name]["total_completion_tokens"] += usage.candidates_token_count
-
-            api_key_stats[str(current_key_index)][model_name]["successful_responses"] += 1
-            db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
-
+            
             return bot_response
 
         except Exception as e:
@@ -183,11 +138,11 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
 
     await client.send_message("me", "❌ All API keys failed.")
     raise Exception("All Gemini API keys failed.")
+
 def get_api_keys_db():
     """Get connection to separate API Keys database"""
     client = pymongo.MongoClient(config.db_url)
-    return client["ApiKeys"] 
-
+    return client["ApiKeys"]
 
 def get_gemini_keys():
     """Get Gemini API keys from centralized Api Keys database"""
@@ -195,7 +150,6 @@ def get_gemini_keys():
         api_db = get_api_keys_db()
         result = api_db["gemini_keys"].find_one({"type": "keys"})
         if result is None:
-            # Initialize with empty keys - this will create the database and collection
             api_db["gemini_keys"].insert_one({"type": "keys", "keys": []})
             return []
         return result.get("keys", [])
@@ -207,10 +161,9 @@ def save_gemini_keys(keys):
     """Save Gemini API keys to centralized Api Keys database"""
     try:
         api_db = get_api_keys_db()
-        # Use update_one with upsert to ensure document exists
         api_db["gemini_keys"].update_one(
-            {"type": "keys"}, 
-            {"$set": {"keys": keys}}, 
+            {"type": "keys"},
+            {"$set": {"keys": keys}},
             upsert=True
         )
         print(f"Saved {len(keys)} keys to Api Keys database")
@@ -243,7 +196,7 @@ async def handle_voice_message(client, chat_id, bot_response, message_id):
             audio_path = await generate_elevenlabs_audio(text=bot_response[3:])
             if audio_path:
                 await client.send_voice(chat_id=chat_id, voice=audio_path)
-                await asyncio.sleep(random.uniform(0.5, 2.0)) # <--- ADDED POST-SEND DELAY
+                await asyncio.sleep(random.uniform(0.5, 2.0))
                 if mark_as_read_enabled:
                     await client.read_chat_history(chat_id=chat_id, max_id=message_id)
                 os.remove(audio_path)
@@ -251,7 +204,7 @@ async def handle_voice_message(client, chat_id, bot_response, message_id):
         except Exception as e:
             bot_response = bot_response[3:].strip()
             await client.send_message(chat_id, bot_response)
-            await asyncio.sleep(random.uniform(0.5, 2.0)) # <--- ADDED POST-SEND DELAY
+            await asyncio.sleep(random.uniform(0.5, 2.0))
             if mark_as_read_enabled:
                 await client.read_chat_history(chat_id=chat_id, max_id=message_id)
             return True
@@ -303,8 +256,9 @@ async def gchat(client: Client, message: Message):
 
 async def process_messages(client, message, user_id, user_name):
     try:
+        global_role_state = db.get(collection, "global_default_role_state") or "primary"
+
         while user_message_queues[user_id]:
-            # Initial random delay before processing a batch
             delay = random.choice([6, 10, 12])
             await asyncio.sleep(delay)
 
@@ -318,21 +272,20 @@ async def process_messages(client, message, user_id, user_name):
 
             combined_message = " ".join(batch)
             clear_user_message_queue(user_id)
+            
+            user_specific_state = db.get(collection, f"current_role_key.{user_id}")
+            active_state_for_user = user_specific_state or global_role_state
+            
+            user_primary_role = db.get(collection, f"custom_roles_primary.{user_id}")
+            user_secondary_role = db.get(collection, f"custom_roles_secondary.{user_id}")
 
-            current_role_content = db.get(collection, f"custom_roles.{user_id}")
-            primary_role_for_user_content = db.get(collection, f"custom_roles_primary.{user_id}") or default_bot_role
-            secondary_role_for_user_content = db.get(collection, f"custom_roles_secondary.{user_id}") or default_secondary_role
+            if active_state_for_user == "secondary":
+                bot_role_content = user_secondary_role or default_secondary_role
+            else:
+                bot_role_content = user_primary_role or default_bot_role
 
-            model_to_use = default_gmodel_name
-            bot_role_content = primary_role_for_user_content
-
-            if current_role_content == secondary_role_for_user_content:
-                model_to_use = secondary_gmodel_name
-                bot_role_content = secondary_role_for_user_content
-            elif current_role_content is None or current_role_content == primary_role_for_user_content:
-                model_to_use = default_gmodel_name
-                bot_role_content = primary_role_for_user_content
-
+            model_to_use = gmodel_name
+            
             chat_history_list = get_chat_history(user_id, bot_role_content, combined_message, user_name)
             global_history_limit = db.get(collection, "history_limit")
             if global_history_limit:
@@ -341,7 +294,6 @@ async def process_messages(client, message, user_id, user_name):
                 limited_history = chat_history_list
 
             full_prompt = build_gemini_prompt(bot_role_content, limited_history, combined_message)
-
             await send_typing_action(client, message.chat.id, combined_message)
 
             bot_response = ""
@@ -356,7 +308,6 @@ async def process_messages(client, message, user_id, user_name):
                 db.set(collection, f"chat_history.{user_id}", chat_history_list)
 
                 if await handle_voice_message(client, message.chat.id, bot_response, message.id):
-                    # handle_voice_message already includes its own post-send delay
                     continue
 
                 response_length = len(bot_response)
@@ -370,14 +321,14 @@ async def process_messages(client, message, user_id, user_name):
                     elapsed_time += 2
 
                 await message.reply_text(bot_response)
-                await asyncio.sleep(random.uniform(0.5, 2.0)) # <--- CRITICAL ADDITION: POST-SEND DELAY
+                await asyncio.sleep(random.uniform(0.5, 2.0))
                 if mark_as_read_enabled:
                     await client.read_chat_history(chat_id=message.chat.id, max_id=message.id)
 
             except Exception as api_call_e:
                 user_message_queues[user_id].extendleft(reversed(batch))
                 save_user_message_to_db(user_id, combined_message)
-                await client.send_message("me", f"❌ Critical: Failed to process message for user {user_id} after all API key retries. Message re-queued. Error: {str(api_call_e)}")
+                await client.send_message("me", f"❌ Critical: Failed to process message for user {user_id}. Message re-queued. Error: {str(api_call_e)}")
                 break
 
         active_users.discard(user_id)
@@ -399,19 +350,19 @@ async def handle_files(client: Client, message: Message):
         if message.caption and message.caption.strip().startswith("Reacted to this message with"):
             return
 
-        current_role_content = db.get(collection, f"custom_roles.{user_id}")
-        primary_role_for_user_content = db.get(collection, f"custom_roles_primary.{user_id}") or default_bot_role
-        secondary_role_for_user_content = db.get(collection, f"custom_roles_secondary.{user_id}") or default_secondary_role
+        global_role_state = db.get(collection, "global_default_role_state") or "primary"
+        user_specific_state = db.get(collection, f"current_role_key.{user_id}")
+        active_state_for_user = user_specific_state or global_role_state
+        
+        user_primary_role = db.get(collection, f"custom_roles_primary.{user_id}")
+        user_secondary_role = db.get(collection, f"custom_roles_secondary.{user_id}")
 
-        model_to_use = default_gmodel_name
-        bot_role = primary_role_for_user_content
+        if active_state_for_user == "secondary":
+            bot_role = user_secondary_role or default_secondary_role
+        else:
+            bot_role = user_primary_role or default_bot_role
 
-        if current_role_content == secondary_role_for_user_content:
-            model_to_use = secondary_gmodel_name
-            bot_role = secondary_role_for_user_content
-        elif current_role_content is None or current_role_content == primary_role_for_user_content:
-            model_to_use = default_gmodel_name
-            bot_role = primary_role_for_user_content
+        model_to_use = gmodel_name
 
         caption = message.caption.strip() if message.caption else ""
         chat_history_list = get_chat_history(user_id, bot_role, caption, user_name)
@@ -426,7 +377,7 @@ async def handle_files(client: Client, message: Message):
                 client.image_timers[user_id] = None
 
             image_path = await client.download_media(message.photo)
-            await asyncio.sleep(random.uniform(0.1, 0.5)) # <--- ADDED POST-DOWNLOAD DELAY
+            await asyncio.sleep(random.uniform(0.1, 0.5))
             client.image_buffer[user_id].append(image_path)
 
             if client.image_timers[user_id] is None:
@@ -456,12 +407,12 @@ async def handle_files(client: Client, message: Message):
                         response = await _call_gemini_api(client, input_data, user_id, model_to_use, chat_history_list, is_image_input=True)
 
                         await message.reply_text(response, reply_to_message_id=message.id)
-                        await asyncio.sleep(random.uniform(0.5, 2.0)) # <--- ADDED POST-SEND DELAY
+                        await asyncio.sleep(random.uniform(0.5, 2.0))
                         if mark_as_read_enabled:
                             await client.read_chat_history(chat_id=message.chat.id, max_id=message.id)
 
                     except Exception as e_image_process:
-                        await client.send_message("me", f"Error processing images in `handle_files` for user {user_id}: {str(e_image_process)}")
+                        await client.send_message("me", f"Error processing images for user {user_id}: {str(e_image_process)}")
                     finally:
                         for img_path in image_paths:
                             if os.path.exists(img_path):
@@ -482,7 +433,7 @@ async def handle_files(client: Client, message: Message):
             file_type, file_path = "document", await client.download_media(message.document)
 
         if file_path and file_type:
-            await asyncio.sleep(random.uniform(0.1, 0.5)) # <--- ADDED POST-DOWNLOAD DELAY
+            await asyncio.sleep(random.uniform(0.1, 0.5))
             try:
                 uploaded_file = await upload_file_to_gemini(file_path, file_type)
                 prompt_text = f"User has sent a {file_type}." + (f" Caption: {caption}" if caption else "")
@@ -492,16 +443,16 @@ async def handle_files(client: Client, message: Message):
                 response = await _call_gemini_api(client, input_data, user_id, model_to_use, chat_history_list, is_image_input=True)
 
                 await message.reply_text(response, reply_to_message_id=message.id)
-                await asyncio.sleep(random.uniform(0.5, 2.0)) # <--- ADDED POST-SEND DELAY
+                await asyncio.sleep(random.uniform(0.5, 2.0))
                 if mark_as_read_enabled:
                     await client.read_chat_history(chat_id=message.chat.id, max_id=message.id)
                 return
 
             except Exception as e_file_process:
-                await client.send_message("me", f"Error processing {file_type} in `handle_files` for user {user_id}: {str(e_file_process)}")
+                await client.send_message("me", f"Error processing {file_type} for user {user_id}: {str(e_file_process)}")
 
     except Exception as e:
-        await client.send_message("me", f"An error occurred in `handle_files` function for user {user_id}:\n\n{str(e)}")
+        await client.send_message("me", f"An error occurred in `handle_files` for user {user_id}:\n\n{str(e)}")
     finally:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
@@ -512,9 +463,8 @@ async def gchat_command(client: Client, message: Message):
     try:
         parts = message.text.strip().split()
         if len(parts) < 2:
-            await client.send_message("me", f"<b>Usage:</b> {prefix}gchat [on|off|del|dell all|all|history [number|off]] [user_id]")
-            await asyncio.sleep(0.02)
             await message.delete()
+            await client.send_message("me", f"<b>Usage:</b> {prefix}gchat [on|off|del|dell all|all|history [number|off]] [user_id]")
             return
 
         command = parts[1].lower()
@@ -527,7 +477,7 @@ async def gchat_command(client: Client, message: Message):
             if user_id not in enabled_users:
                 enabled_users.append(user_id)
                 db.set(collection, "enabled_users", enabled_users)
-            await client.send_message("me", f"<b>gchat is enabled for user {user_id}.</b>")
+            await client.send_message("me", f"<b>gchat enabled for user {user_id}.</b>")
         elif command == "off":
             if user_id not in disabled_users:
                 disabled_users.append(user_id)
@@ -535,7 +485,7 @@ async def gchat_command(client: Client, message: Message):
             if user_id in enabled_users:
                 enabled_users.remove(user_id)
                 db.set(collection, "enabled_users", enabled_users)
-            await client.send_message("me", f"<b>gchat is disabled for user {user_id}.</b>")
+            await client.send_message("me", f"<b>gchat disabled for user {user_id}.</b>")
         elif command == "del":
             db.set(collection, f"chat_history.{user_id}", None)
             await client.send_message("me", f"<b>Chat history deleted for user {user_id}.</b>")
@@ -553,51 +503,39 @@ async def gchat_command(client: Client, message: Message):
             if len(parts) == 2:
                 current_limit = db.get(collection, "history_limit")
                 if current_limit:
-                    await client.send_message("me", f"Global history limit is set to the last {current_limit} messages.")
+                    await client.send_message("me", f"Global history limit: last {current_limit} messages.")
                 else:
-                    await client.send_message("me", "No global history limit set. Sending full history.")
+                    await client.send_message("me", "No global history limit set.")
             elif len(parts) >= 3:
                 if parts[2].lower() == "off":
                     db.set(collection, "history_limit", None)
-                    await client.send_message("me", "History limit disabled. Now sending full chat history.")
+                    await client.send_message("me", "History limit disabled.")
                 else:
                     try:
                         num = int(parts[2])
                         db.set(collection, "history_limit", num)
-                        await client.send_message("me", f"Global history limit set. Only last {num} messages will be sent.")
+                        await client.send_message("me", f"Global history limit set to last {num} messages.")
                     except ValueError:
-                        await client.send_message("me", "Invalid number provided for history limit.")
-            else:
-                await client.send_message("me", f"<b>Usage:</b> {prefix}gchat [on|off|del|dell all|all|history [number|off]] [user_id]")
-
-        await asyncio.sleep(0.02)
+                        await client.send_message("me", "Invalid number for history limit.")
+        else:
+            await client.send_message("me", f"<b>Invalid gchat command.</b>")
+        
         await message.delete()
     except Exception as e:
-        await client.send_message("me", f"An error occurred in the `gchat` command:\n\n{str(e)}")
+        await client.send_message("me", f"Error in `gchat` command:\n\n{str(e)}")
+
 
 @Client.on_message(filters.command("gread", prefix) & filters.me)
 async def gread_command(client: Client, message: Message):
     global mark_as_read_enabled
     try:
-        parts = message.text.strip().split()
-        if len(parts) < 2:
-            current_status = "enabled" if mark_as_read_enabled else "disabled"
-            await message.edit_text(f"<b>Mark as read is currently:</b> {current_status}. Use `{prefix}gread [on|off]` to change.")
-            return
+        # Toggle the current setting
+        mark_as_read_enabled = not mark_as_read_enabled
+        db.set(collection, "mark_as_read_enabled", mark_as_read_enabled)
+        
+        status = "enabled" if mark_as_read_enabled else "disabled"
+        await message.edit_text(f"✅ **Mark as read is now {status}.**")
 
-        command = parts[1].lower()
-
-        if command == "on":
-            mark_as_read_enabled = True
-            db.set(collection, "mark_as_read_enabled", True)
-            await message.edit_text("<b>Mark as read has been enabled.</b>")
-        elif command == "off":
-            mark_as_read_enabled = False
-            db.set(collection, "mark_as_read_enabled", False)
-            await message.edit_text("<b>Mark as read has been disabled.</b>")
-        else:
-            await message.edit_text(f"<b>Usage:</b> {prefix}gread [on|off]")
-            
     except Exception as e:
         await client.send_message("me", f"An error occurred in the `gread` command:\n\n{str(e)}")
 
@@ -609,16 +547,16 @@ async def set_custom_role(client: Client, message: Message):
         custom_role = " ".join(parts[2:]).strip()
 
         if not custom_role:
-            db.set(collection, f"custom_roles.{user_id}", default_bot_role)
-            db.set(collection, f"custom_roles_primary.{user_id}", default_bot_role)
+            db.set(collection, f"custom_roles_primary.{user_id}", None)
+            db.set(collection, f"current_role_key.{user_id}", None)
             db.set(collection, f"chat_history.{user_id}", None)
-            await client.send_message("me", f"Primary role reset to default for user {user_id}:\n{default_bot_role}")
+            await client.send_message("me", f"✅ Role for user `{user_id}` reset to global default.")
         else:
-            db.set(collection, f"custom_roles.{user_id}", custom_role)
             db.set(collection, f"custom_roles_primary.{user_id}", custom_role)
+            db.set(collection, f"current_role_key.{user_id}", "primary")
             db.set(collection, f"chat_history.{user_id}", None)
-            await client.send_message("me", f"Custom primary role set for user {user_id}:\n{custom_role}")
-        await asyncio.sleep(0.02)
+            await client.send_message("me", f"✅ Custom primary role set for user `{user_id}`.")
+            
         await message.delete()
     except Exception as e:
         await client.send_message("me", f"An error occurred in the `role` command:\n\n{str(e)}")
@@ -627,69 +565,52 @@ async def set_custom_role(client: Client, message: Message):
 async def toggle_or_reset_secondary_role(client: Client, message: Message):
     try:
         parts = message.text.strip().split()
+        user_id_str = parts[1] if len(parts) > 1 and parts[1].isdigit() else str(message.chat.id)
+        user_id = int(user_id_str)
+        
+        role_text_start_index = 2 if user_id_str in parts else 1
+        custom_secondary_text = " ".join(parts[role_text_start_index:]).strip()
 
-        if len(parts) >= 2 and parts[1].lower() == "all":
-            global_shift = db.get(collection, "global_role_shift") or "primary"
-            new_state = "secondary" if global_shift == "primary" else "primary"
-            count = 0
-            for uid in set(enabled_users + disabled_users):
-                if new_state == "primary":
-                    primary_role = db.get(collection, f"custom_roles_primary.{uid}") or default_bot_role
-                    db.set(collection, f"custom_roles.{uid}", primary_role)
-                else:
-                    custom_secondary = db.get(collection, f"custom_roles_secondary.{uid}")
-                    secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
-                    db.set(collection, f"custom_roles.{uid}", secondary_role)
-                db.set(collection, f"chat_history.{uid}", None)
-                count += 1
-            db.set(collection, "global_role_shift", new_state)
-            db.set(collection, "global_current_role", new_state)
-            await client.send_message("me", f"Force-shifted roles for {count} users to {new_state} role.")
-            return
+        global_role_state = db.get(collection, "global_default_role_state") or "primary"
+        user_specific_state = db.get(collection, f"current_role_key.{user_id}")
+        effective_current_state = user_specific_state or global_role_state
 
-        reset_command = parts[-1].lower() == "r"
-        if len(parts) >= 2 and parts[1].isdigit():
-            user_id = int(parts[1])
-            role_text_index = 2
-        else:
-            user_id = message.chat.id
-            role_text_index = 1
-
-        primary_role = db.get(collection, f"custom_roles_primary.{user_id}") or default_bot_role
-        custom_secondary = db.get(collection, f"custom_roles_secondary.{user_id}")
-        secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
-
-        if reset_command:
-            db.set(collection, f"custom_roles_secondary.{user_id}", None)
-            current_role = db.get(collection, f"custom_roles.{user_id}") or primary_role
-            if current_role != primary_role:
-                db.set(collection, f"custom_roles.{user_id}", default_secondary_role)
-            await client.send_message("me", f"Secondary role reset to default for user {user_id}:\n{default_secondary_role}")
+        if custom_secondary_text:
+            db.set(collection, f"custom_roles_secondary.{user_id}", custom_secondary_text)
+            db.set(collection, f"current_role_key.{user_id}", "secondary")
             db.set(collection, f"chat_history.{user_id}", None)
+            await client.send_message("me", f"✅ Custom secondary role set for user `{user_id}`.")
             return
 
-        if len(parts) > role_text_index:
-            custom_secondary_text = " ".join(parts[role_text_index:]).strip()
-            if custom_secondary_text:
-                db.set(collection, f"custom_roles_secondary.{user_id}", custom_secondary_text)
-                secondary_role = custom_secondary_text
-                current_role = db.get(collection, f"custom_roles.{user_id}") or primary_role
-                if current_role != primary_role:
-                    db.set(collection, f"custom_roles.{user_id}", secondary_role)
-                await client.send_message("me", f"Custom secondary role set for user {user_id}:\n{secondary_role}")
-                db.set(collection, f"chat_history.{user_id}", None)
-                return
-
-        current_role = db.get(collection, f"custom_roles.{user_id}") or primary_role
-        if current_role == primary_role:
-            db.set(collection, f"custom_roles.{user_id}", secondary_role)
-            await client.send_message("me", f"Switched to secondary role for user {user_id}:\n{secondary_role}")
+        if effective_current_state == "primary":
+            db.set(collection, f"current_role_key.{user_id}", "secondary")
+            role_type = "secondary"
         else:
-            db.set(collection, f"custom_roles.{user_id}", primary_role)
-            await client.send_message("me", f"Switched back to primary role for user {user_id}:\n{primary_role}")
+            db.set(collection, f"current_role_key.{user_id}", "primary")
+            role_type = "primary"
+        
         db.set(collection, f"chat_history.{user_id}", None)
+        await client.send_message("me", f"✅ Switched user `{user_id}` to their **{role_type}** role.")
+
     except Exception as e:
         await client.send_message("me", f"An error occurred in the `rolex` command:\n\n{str(e)}")
+
+@Client.on_message(filters.command("roleswitch", prefix) & filters.me)
+async def roleswitch_command(client: Client, message: Message):
+    try:
+        current_state = db.get(collection, "global_default_role_state") or "primary"
+        
+        if current_state == "primary":
+            new_state = "secondary"
+        else:
+            new_state = "primary"
+            
+        db.set(collection, "global_default_role_state", new_state)
+        
+        await message.edit_text(f"✅ **Global default role switched to `{new_state}`.**\n\n⚠️ Chat histories not cleared.")
+
+    except Exception as e:
+        await client.send_message("me", f"An error occurred in `roleswitch` command:\n\n{str(e)}")
 
 @Client.on_message(filters.command("setgkey", prefix) & filters.me)
 async def set_gemini_key(client: Client, message: Message):
@@ -697,155 +618,92 @@ async def set_gemini_key(client: Client, message: Message):
         command = message.text.strip().split()
         subcommand, key = command[1] if len(command) > 1 else None, command[2] if len(command) > 2 else None
 
-        gemini_keys = get_gemini_keys()  # Changed from db.get to centralized function
+        gemini_keys = get_gemini_keys()
         current_key_index = db.get(collection, "current_key_index") or 0
 
         if subcommand == "add" and key:
-            if add_gemini_key(key):  # Use new function that checks for duplicates
-                await message.edit_text("New Gemini API key added successfully!")
+            if add_gemini_key(key):
+                await message.edit_text("✅ New Gemini API key added.")
             else:
-                await message.edit_text("This Gemini API key already exists!")
+                await message.edit_text("⚠️ This Gemini API key already exists.")
         elif subcommand == "set" and key:
             index = int(key) - 1
             if 0 <= index < len(gemini_keys):
-                current_key_index = index
-                db.set(collection, "current_key_index", current_key_index)
-                await message.edit_text(f"Current Gemini API key set to key {key}.")
+                db.set(collection, "current_key_index", index)
+                await message.edit_text(f"✅ Current Gemini API key set to key **{key}**.")
             else:
-                await message.edit_text(f"Invalid key index: {key}.")
+                await message.edit_text(f"❌ Invalid key index: {key}.")
         elif subcommand == "del" and key:
             index = int(key) - 1
             if 0 <= index < len(gemini_keys):
-                deleted_key = gemini_keys.pop(index)
-                save_gemini_keys(gemini_keys)  # Use centralized save function
-                api_key_stats.pop(str(index), None)
-                db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
+                gemini_keys.pop(index)
+                save_gemini_keys(gemini_keys)
                 if current_key_index >= len(gemini_keys):
-                    current_key_index = max(0, len(gemini_keys) - 1)
-                    db.set(collection, "current_key_index", current_key_index)
-                await message.edit_text(f"Gemini API key {key} deleted successfully!")
+                    db.set(collection, "current_key_index", max(0, len(gemini_keys) - 1))
+                await message.edit_text(f"✅ Gemini API key {key} deleted.")
             else:
-                await message.edit_text(f"Invalid key index: {key}.")
+                await message.edit_text(f"❌ Invalid key index: {key}.")
         elif subcommand == "show":
             if not gemini_keys:
                 await message.edit_text("No Gemini API keys available.")
             else:
-                keys_list = "\n".join([f"{i + 1}. {key}" for i, key in enumerate(gemini_keys)])
-                await client.send_message("me", f"<b>Full Gemini API Keys:</b>\n\n{keys_list}")
+                keys_list = "\n".join([f"**{i + 1}**: `{key}`" for i, key in enumerate(gemini_keys)])
+                await client.send_message("me", f"🔑 **Full Gemini API Keys:**\n\n{keys_list}")
                 await message.edit_text("Full API keys sent to saved messages.")
         else:
+            if not gemini_keys:
+                 await message.edit_text("No Gemini API keys added yet.")
+                 return
             keys_list = "\n".join(
-                [f"{i + 1}. {key[:10]}..." for i, key in enumerate(gemini_keys)]
+                [f"**{i + 1}**: `{key[:10]}...`" for i, key in enumerate(gemini_keys)]
             )
-            current_key_display = gemini_keys[current_key_index][:10] + "..." if gemini_keys else "None"
+            current_key_display = f"**{current_key_index + 1}** (`{gemini_keys[current_key_index][:10]}...`)"
             await message.edit_text(
-                f"<b>Gemini API keys:</b>\n\n<code>{keys_list or 'No keys added.'}</code>\n\n<b>Current key:</b> <code>{current_key_display}</code>"
+                f"🔑 **Gemini API keys:**\n\n{keys_list}\n\n➡️ **Current key:** {current_key_display}"
             )
 
     except Exception as e:
         await client.send_message("me", f"An error occurred in the `setgkey` command:\n\n{str(e)}")
 
-# Replace the show_api_status function
-@Client.on_message(filters.command("gstatus", prefix) & filters.me)
-async def show_api_status(client: Client, message: Message):
-    try:
-        gemini_keys = get_gemini_keys()  # Changed from db.get to centralized function
-        current_key_index = db.get(collection, "current_key_index") or 0
-
-        usage_report = "<b>Gemini API Usage Status (GChat):</b>\n\n"
-        if not gemini_keys:
-            usage_report += "No Gemini API keys configured."
-        else:
-            for i, key in enumerate(gemini_keys):
-                key_str = str(i)
-                is_current = " (Current)" if i == current_key_index else ""
-
-                if key_str not in api_key_stats or not api_key_stats[key_str]:
-                    usage_report += (
-                        f"<b>Key {i + 1}{is_current}:</b>\n"
-                        f"  No usage data available for this key.\n\n"
-                    )
-                    continue
-
-                usage_report += (
-                    f"<b>Key {i + 1}{is_current} ({key[:10]}...):</b>\n"
-                )
-
-                for model_name, stats in api_key_stats[key_str].items():
-                    usage_report += (
-                        f"  <u>Model: {model_name}</u>\n"
-                        f"    Total Requests: {stats['total_requests']}\n"
-                        f"    Successful Responses: {stats['successful_responses']}\n"
-                        f"    Prompt Tokens: {stats['total_prompt_tokens']}\n"
-                        f"    Completion Tokens: {stats['total_completion_tokens']}\n"
-                    )
-                usage_report += "\n"
-
-        await message.edit_text(usage_report)
-
-    except Exception as e:
-        await client.send_message(
-            "me", f"An error occurred in the `gstatus` command:\n\n{str(e)}"
-        )
 @Client.on_message(filters.command("setgmodel", prefix) & filters.me)
 async def set_gemini_model(client: Client, message: Message):
-    global default_gmodel_name, secondary_gmodel_name
+    global gmodel_name
     try:
         parts = message.text.strip().split()
         if len(parts) < 2:
             await message.edit_text(
-                f"<b>Usage:</b> {prefix}setgmodel `default <model_name>` | `secondary <model_name>` | `show`"
+                f"🤖 **Current Gemini Model:** `{gmodel_name}`\n\n"
+                f"**Usage:** `{prefix}setgmodel <model_name>`"
             )
             return
 
-        command = parts[1].lower()
-
-        if command == "default" and len(parts) > 2:
-            new_model = parts[2].strip()
-            default_gmodel_name = new_model
-            db.set(collection, "default_gmodel_name", default_gmodel_name)
-            await message.edit_text(f"<b>Default model set to:</b> <code>{default_gmodel_name}</code>")
-        elif command == "secondary" and len(parts) > 2:
-            new_model = parts[2].strip()
-            secondary_gmodel_name = new_model
-            db.set(collection, "secondary_gmodel_name", secondary_gmodel_name)
-            await message.edit_text(f"<b>Secondary model set to:</b> <code>{secondary_gmodel_name}</code>")
-        elif command == "show":
-            await message.edit_text(
-                f"<b>Current Gemini Models (GChat):</b>\n"
-                f"<b>Default Role Model:</b> <code>{default_gmodel_name}</code>\n"
-                f"<b>Secondary Role Model:</b> <code>{secondary_gmodel_name}</code>"
-            )
-        else:
-            await message.edit_text(
-                f"<b>Usage:</b> {prefix}setgmodel `default <model_name>` | `secondary <model_name>` | `show`"
-            )
+        new_model = parts[1].strip()
+        gmodel_name = new_model
+        db.set(collection, "gmodel_name", gmodel_name)
+        await message.edit_text(f"✅ **Gemini model set to:** `{gmodel_name}`")
 
     except Exception as e:
         await client.send_message(
-            "me", f"An error occurred in the `setgmodel` command:\n\n{str(e)}"
+            "me", f"An error occurred in `setgmodel` command:\n\n{str(e)}"
         )
 
 
-
 modules_help["gchat"] = {
-    "gchat on [user_id]": "Enable gchat for the specified user or current user in the chat.",
-    "gchat off [user_id]": "Disable gchat for the specified user or current user in the chat.",
-    "gchat del [user_id]": "Delete the chat history for the specified user or current user.",
-    "gchat dell all": "Delete the chat history for all users.",
+    "gchat on/off [user_id]": "Enable or disable gchat for a user.",
+    "gchat del [user_id]": "Delete chat history for a user.",
+    "gchat dell all": "Delete chat history for all users.",
     "gchat all": "Toggle gchat for all users globally.",
-    "gchat history [number|off]": "Set history limit for all users globally.",
-    "gread [on|off]": "Enable or disable the 'mark as read' feature for incoming GChat messages.",
-    "role [user_id] <custom role>": "Set a custom role for the bot for the specified user or current user and clear existing chat history.",
-    "rolex [user_id] <secondary role>": "Switch to a secondary role for the specified user or current user.",
-    "rolex [user_id]": "Switch to a secondary or revert role for the specified user or current user.",
-    "rolex all": "Force-switch all users to primary or secondary role.",
+    "gchat history [num|off]": "Set a global history limit.",
+    "roleswitch": "Switch the global default role between primary and secondary.",
+    "role [user_id] <prompt>": "Set a custom primary role for a user.",
+    "role [user_id]": "Reset a user's role to the global default.",
+    "rolex [user_id] <prompt>": "Set a custom secondary role for a user.",
+    "rolex [user_id]": "Toggle a specific user between their primary/secondary roles.",
+    "gread": "Toggle the 'mark as read' feature (disabled by default).",
     "setgkey add <key>": "Add a new Gemini API key.",
-    "setgkey set <index>": "Set the current Gemini API key by index.",
-    "setgkey del <index>": "Delete a Gemini API key by index.",
-    "setgkey": "Display all available Gemini API keys and the current key.",
-    "setgmodel default <model_name>": "Set the Gemini model for the default role (e.g., gemini-2.0-flash) in gchat.",
-    "setgmodel secondary <model_name>": "Set the Gemini model for the secondary role (e.g., gemini-1.5-flash) in gchat.",
-    "setgmodel show": "Display the currently configured Gemini models for gchat.",
-    "gstatus": "Display Gemini API usage statistics (requests, tokens) per key and per model for gchat.",
+    "setgkey set <index>": "Set the active Gemini API key.",
+    "setgkey del <index>": "Delete a Gemini API key.",
+    "setgkey show": "Send full API keys to your saved messages.",
+    "setgkey": "Show available Gemini API keys.",
+    "setgmodel <model_name>": "Set the Gemini model for the entire system."
 }
