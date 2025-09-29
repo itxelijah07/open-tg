@@ -121,12 +121,9 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
         api_key_stats = defaultdict(lambda: defaultdict(lambda: {"total_requests": 0, "successful_responses": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0}))
         db.set(collection, "api_key_stats", _defaultdict_to_dict(api_key_stats))
         db.set(collection, "last_stats_reset", str(current_utc_date))
-        await client.send_message("me", f"ℹ️ Gemini API usage stats reset for all keys at UTC midnight ({current_utc_date}).")
 
-    gemini_keys = get_gemini_keys()  # Changed from db.get to centralized function
+    gemini_keys = get_gemini_keys()
     if not gemini_keys:
-        error_msg = f"Error: No Gemini API keys found for user {user_id}. Please add keys using .setgkey add <key>"
-        await client.send_message("me", error_msg)
         raise ValueError("No Gemini API keys configured.")
 
     current_key_index = db.get(collection, "current_key_index") or 0
@@ -164,48 +161,19 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
 
         except Exception as e:
             error_str = str(e).lower()
-            failed_key_model_stats = api_key_stats[str(current_key_index)][model_name]
-            usage_info = (
-                f"  Total Requests: {failed_key_model_stats['total_requests']}\n"
-                f"  Successful Responses: {failed_key_model_stats['successful_responses']}\n"
-                f"  Prompt Tokens: {failed_key_model_stats['total_prompt_tokens']}\n"
-                f"  Completion Tokens: {failed_key_model_stats['total_completion_tokens']}"
-            )
             from pyrogram.errors import FloodWait
 
             if isinstance(e, FloodWait):
-                await client.send_message(
-                    "me",
-                    f"🚨 **Gemini API Error & Key Switch Notice** 🚨\n\n"
-                    f"**Error:** `{str(e)}`\n"
-                    f"**Key Index:** `{current_key_index}`\n"
-                    f"**Model:** `{model_name}`\n\n"
-                    f"**Usage for Key {current_key_index} (Model: {model_name}):**\n{usage_info}\n\n"
-                    f"Attempting to switch to next API key after waiting {e.value} seconds..."
-                )
+                await client.send_message("me", f"⏳ Rate limited, switching key...")
                 await asyncio.sleep(e.value + 1)
                 current_key_index = (current_key_index + 1) % len(gemini_keys)
                 db.set(collection, "current_key_index", current_key_index)
             elif "429" in error_str or "invalid" in error_str or "blocked" in error_str:
-                await client.send_message(
-                    "me",
-                    f"🚨 **Gemini API Error & Key Switch Notice** 🚨\n\n"
-                    f"**Error:** `{str(e)}`\n"
-                    f"**Key Index:** `{current_key_index}`\n"
-                    f"**Model:** `{model_name}`\n\n"
-                    f"**Usage for Key {current_key_index} (Model: {model_name}):**\n{usage_info}\n\n"
-                    f"Attempting to switch to next API key..."
-                )
+                await client.send_message("me", f"🔄 Key {current_key_index} failed, switching...")
                 current_key_index = (current_key_index + 1) % len(gemini_keys)
                 db.set(collection, "current_key_index", current_key_index)
                 await asyncio.sleep(4)
             else:
-                await client.send_message(
-                    "me",
-                    f"⚠️ Unexpected error calling Gemini API for user {user_id} (key index {current_key_index}, attempt {attempt+1}):\n"
-                    f"Error: {e}\n"
-                    f"Usage for Key {current_key_index} (Model: {model_name}):\n{usage_info}"
-                )
                 if (attempt + 1) % retries_per_key == 0 and (current_key_index == initial_key_index or len(gemini_keys) == 1):
                     raise e
                 else:
@@ -213,10 +181,8 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
                     db.set(collection, "current_key_index", current_key_index)
                     await asyncio.sleep(2)
 
-    final_error_msg = f"⚠️ All Gemini API keys failed after {total_retries} attempts for user {user_id} with model {model_name}. Message not processed."
-    await client.send_message("me", final_error_msg)
+    await client.send_message("me", "❌ All API keys failed.")
     raise Exception("All Gemini API keys failed.")
-
 def get_api_keys_db():
     """Get connection to separate API Keys database"""
     client = pymongo.MongoClient(config.db_url)
