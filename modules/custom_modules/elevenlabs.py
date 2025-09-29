@@ -5,12 +5,60 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 from utils.misc import modules_help, prefix
 from utils.db import db
+import pymongo
+from utils import config
+
+# --- Default Parameters ---
 
 DEFAULT_PARAMS = {
     "voice_id": "QLDNM6o3lDbtfJLUO890",
     "stability": 0.3,
     "similarity_boost": 0.9,
 }
+
+# --- Centralized API Key Management ---
+
+def get_api_keys_db():
+    """Get connection to the separate API Keys database."""
+    client = pymongo.MongoClient(config.db_url)
+    return client["ApiKeys"]
+
+def get_elevenlabs_keys():
+    """Get ElevenLabs API keys from the centralized ApiKeys database."""
+    try:
+        api_db = get_api_keys_db()
+        result = api_db["elevenlabs_keys"].find_one({"type": "keys"})
+        if result is None:
+            # If the collection doesn't exist, create it
+            api_db["elevenlabs_keys"].insert_one({"type": "keys", "keys": []})
+            return []
+        return result.get("keys", [])
+    except Exception as e:
+        print(f"Error getting elevenlabs keys: {e}")
+        return []
+
+def save_elevenlabs_keys(keys):
+    """Save ElevenLabs API keys to the centralized ApiKeys database."""
+    try:
+        api_db = get_api_keys_db()
+        api_db["elevenlabs_keys"].update_one(
+            {"type": "keys"},
+            {"$set": {"keys": keys}},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"Error saving elevenlabs keys: {e}")
+
+def add_elevenlabs_key(new_key):
+    """Add a new ElevenLabs API key if it doesn't already exist."""
+    keys = get_elevenlabs_keys()
+    if new_key not in keys:
+        keys.append(new_key)
+        save_elevenlabs_keys(keys)
+        return True
+    return False
+
+# --- End of Centralized API Key Management ---
 
 def process_audio(input_path: str, output_path: str, speed: float, volume: float):
     """
@@ -28,7 +76,7 @@ def process_audio(input_path: str, output_path: str, speed: float, volume: float
             "-filter:a",
             f"atempo={speed},volume={volume},acompressor=threshold=-20dB:ratio=2.5:attack=5:release=50",
             "-vn",  # No video
-            "-c:a", "libopus", # Specify Ogg Vorbis codec for OGG
+            "-c:a", "libopus", # Specify Opus codec for OGG
             output_path,
         ],
         check=True
@@ -40,11 +88,12 @@ async def generate_elevenlabs_audio(text: str):
     :param text: Text to convert to speech.
     :return: Path to the generated audio file.
     """
-    api_keys = db.get("custom.elevenlabs", "api_keys", [])
+    api_keys = get_elevenlabs_keys() # Uses centralized DB
     current_key_index = db.get("custom.elevenlabs", "current_key_index", 0)
     
     if not api_keys:
-        raise ValueError(f"No API keys configured! Use {prefix}set_el add_key <key>")
+        # CHANGED: set_el to setel
+        raise ValueError(f"No API keys configured! Use {prefix}setel add <key>")
 
     params = {key: db.get("custom.elevenlabs", key, DEFAULT_PARAMS[key]) for key in DEFAULT_PARAMS}
     
@@ -116,10 +165,8 @@ async def elevenlabs_command(client: Client, message: Message):
         await message.delete()
 
         original_audio_path = await generate_elevenlabs_audio(text)
-        # Change the output path to .ogg
         processed_audio_path = "elevenlabs_voice_processed.ogg"
         
-        # Replacing the audio processing from Code 1 here
         process_audio(original_audio_path, processed_audio_path, speed=0.9, volume=0.9)
 
         await client.send_voice(chat_id=message.chat.id, voice=processed_audio_path)
@@ -157,11 +204,9 @@ async def elevenlabs_video_command(client: Client, message: Message):
         text = " ".join(message.command[1:]).strip()
         await message.delete()
 
-        # Step 1: Generate audio
         audio_path = await generate_elevenlabs_audio(text)
         video_path = "elevenlabs_voice_video.mp4"
 
-        # Step 2: Convert to MP4 with minimal video size
         subprocess.run(
             [
                 "ffmpeg",
@@ -181,7 +226,6 @@ async def elevenlabs_video_command(client: Client, message: Message):
             check=True
         )
 
-        # Step 3: Send video with input text as caption
         await client.send_video(chat_id=message.chat.id, video=video_path, caption=f"🎙️ {text}")
 
     except Exception as e:
@@ -199,74 +243,72 @@ async def elevenlabs_video_command(client: Client, message: Message):
                     print(f"Cleanup error: {cleanup_error}")
 
 
-@Client.on_message(filters.command(["set_elevenlabs", "set_el"], prefix) & filters.me)
+@Client.on_message(filters.command(["set_elevenlabs", "setel"], prefix) & filters.me)
 async def set_elevenlabs_config(_, message: Message):
     """
-    Configure ElevenLabs settings.
+    Configure ElevenLabs settings using centralized key management.
     """
     args = message.command
+    
+    api_keys = get_elevenlabs_keys()
+    current_key_index = db.get("custom.elevenlabs", "current_key_index", 0)
+
     if len(args) == 1:
         current_values = {key: db.get("custom.elevenlabs", key, DEFAULT_PARAMS[key]) for key in DEFAULT_PARAMS}
-        api_keys = db.get("custom.elevenlabs", "api_keys", [])
-        current_key_index = db.get("custom.elevenlabs", "current_key_index", 0)
-        feature_status = db.get("custom.elevenlabs", "enabled", True)  # Get the current status of the feature
+        feature_status = db.get("custom.elevenlabs", "enabled", True)
         
+        if current_key_index >= len(api_keys) and api_keys:
+            current_key_index = 0
+            db.set("custom.elevenlabs", "current_key_index", 0)
+
         response = (
             "**ElevenLabs Configuration**\n\n"
             f"🔑 **API Keys ({len(api_keys)})**:\n"
-            + "\n".join([f"{i+1}. `{key}`{' (current)' if i == current_key_index else ''}" for i, key in enumerate(api_keys)])
+            + "\n".join([f"{i+1}. `{key[:8]}...`{' (current)' if i == current_key_index else ''}" for i, key in enumerate(api_keys)])
             + "\n\n⚙️ **Parameters**:\n"
             + "\n".join([f"• `{key}`: `{value}`" for key, value in current_values.items()])
             + f"\n\n**Feature Status**: {'Enabled' if feature_status else 'Disabled'}\n\n"
             f"**Commands**:\n"
-            f"`{prefix}set_el on` - Enable the ElevenLabs feature\n"
-            f"`{prefix}set_el off` - Disable the ElevenLabs feature"
+     
+            f"`{prefix}setel on` - Enable the ElevenLabs feature\n"
+            f"`{prefix}setel off` - Disable the ElevenLabs feature"
         )
         return await message.edit_text(response, parse_mode=enums.ParseMode.MARKDOWN)
 
     action = args[1].lower()
 
-    # Turn on the ElevenLabs feature
     if action == "on":
         db.set("custom.elevenlabs", "enabled", True)
         return await message.edit_text("✅ ElevenLabs feature has been enabled.")
 
-    # Turn off the ElevenLabs feature
     if action == "off":
         db.set("custom.elevenlabs", "enabled", False)
         return await message.edit_text("✅ ElevenLabs feature has been disabled.")
-    # Add key
+    
     if action == "add" and len(args) >= 3:
         new_key = " ".join(args[2:])
-        api_keys = db.get("custom.elevenlabs", "api_keys", [])
-        if new_key not in api_keys:
-            api_keys.append(new_key)
-            db.set("custom.elevenlabs", "api_keys", api_keys)
-            return await message.edit_text(f"✅ Added new key (Total: {len(api_keys)})")
+        if add_elevenlabs_key(new_key):
+            total_keys = len(get_elevenlabs_keys())
+            return await message.edit_text(f"✅ Added new key (Total: {total_keys})")
         return await message.edit_text("⚠️ Key already exists")
 
-    # Delete key
     if action == "del" and len(args) >= 3:
         try:
             index = int(args[2]) - 1
-            api_keys = db.get("custom.elevenlabs", "api_keys", [])
             if 0 <= index < len(api_keys):
                 deleted = api_keys.pop(index)
-                db.set("custom.elevenlabs", "api_keys", api_keys)
-                # Adjust current index if needed
-                current_index = db.get("custom.elevenlabs", "current_key_index", 0)
-                if current_index >= len(api_keys):
+                save_elevenlabs_keys(api_keys)
+                
+                if current_key_index >= len(api_keys):
                     db.set("custom.elevenlabs", "current_key_index", max(0, len(api_keys)-1))
-                return await message.edit_text(f"✅ Deleted key: `{deleted}`")
+                return await message.edit_text(f"✅ Deleted key: `{deleted[:8]}...`")
             return await message.edit_text("❌ Invalid key number")
         except ValueError:
             return await message.edit_text("❌ Invalid key number")
 
-    # Set active key
     if action == "set" and len(args) >= 3:
         try:
             index = int(args[2]) - 1
-            api_keys = db.get("custom.elevenlabs", "api_keys", [])
             if 0 <= index < len(api_keys):
                 db.set("custom.elevenlabs", "current_key_index", index)
                 return await message.edit_text(f"✅ Active key set to #{index+1}")
@@ -274,33 +316,34 @@ async def set_elevenlabs_config(_, message: Message):
         except ValueError:
             return await message.edit_text("❌ Invalid key number")
 
-    # Original parameter handling
     if len(args) < 3:
         return await message.edit_text("❌ Invalid command format")
 
     key = args[1].lower()
     value = " ".join(args[2:])
     
-    if key not in ["api_key", *DEFAULT_PARAMS.keys()]:
-        return await message.edit_text("❌ Invalid parameter")
-
     if key in ["stability", "similarity_boost"]:
         try:
             value = float(value)
         except ValueError:
             return await message.edit_text("❌ Value must be a number")
-
-    db.set("custom.elevenlabs", key, value)
-    await message.edit_text(f"✅ Updated `{key}` to `{value}`")
+    
+    if key in DEFAULT_PARAMS:
+        db.set("custom.elevenlabs", key, value)
+        await message.edit_text(f"✅ Updated `{key}` to `{value}`")
+    else:
+        await message.edit_text("❌ Invalid parameter")
 
 
 modules_help["elevenlabs"] = {
     "el [text]*": "Generate voice message using ElevenLabs",
-    "set_el": "Show configuration",
-    "set_el on/off": "Enable or Disable Elevenlabs",
-    "set_el add <key>": "Add new API key",
-    "set_el del <num>": "Delete API key by number",
-    "set_el set <num>": "Set active API key",
-    "set_el voice_id <id>": "Set voice id.)",
-    "set_el stability <value>": "set stability.)", 
+    "vl [text]*": "Generate a video note with ElevenLabs audio",
+    "setel": "Show configuration",
+    "setel on/off": "Enable or Disable Elevenlabs",
+    "setel add <key>": "Add new API key to central DB",
+    "setel del <num>": "Delete API key by number from central DB",
+    "setel set <num>": "Set active API key",
+    "setel voice_id <id>": "Set voice id",
+    "setel stability <value>": "Set stability (0.0 to 1.0)",
+    "setel similarity_boost <value>": "Set similarity boost (0.0 to 1.0)",
 }
