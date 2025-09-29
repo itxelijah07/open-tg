@@ -48,7 +48,7 @@ gchat_for_all = db.get(collection, "gchat_for_all") or False
 mark_as_read_enabled = db.get(collection, "mark_as_read_enabled") or False
 
 # A single model for the entire system
-gmodel_name = db.get(collection, "gmodel_name") or "gemini-1.5-flash"
+gmodel_name = db.get(collection, "gmodel_name") or "gemini-2.0-flash"
 
 
 def get_chat_history(user_id, bot_role, user_message, user_name):
