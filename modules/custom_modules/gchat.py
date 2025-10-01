@@ -636,9 +636,9 @@ async def set_gemini_key(client: Client, message: Message):
                 return
             if 0 <= index < len(gemini_keys):
                 db.set(collection, "current_key_index", index)
-                await message.edit_text(f"✅ Current Gemini API key set to key **{index + 1}**.")
+                await message.edit_text(f"✅ Current Gemini API key set to key {index + 1}.")
             else:
-                await message.edit_text(f"❌ Invalid key index: **{index + 1}**.")
+                await message.edit_text(f"❌ Invalid key index: {index + 1}.")
                 
         elif subcommand == "del" and key_arg:
             try:
@@ -651,9 +651,9 @@ async def set_gemini_key(client: Client, message: Message):
                 save_gemini_keys(gemini_keys)
                 if current_key_index >= len(gemini_keys):
                     db.set(collection, "current_key_index", max(0, len(gemini_keys) - 1))
-                await message.edit_text(f"✅ Gemini API key **{index + 1}** deleted.")
+                await message.edit_text(f"✅ Gemini API key {index + 1} deleted.")
             else:
-                await message.edit_text(f"❌ Invalid key index: **{index + 1}**.")
+                await message.edit_text(f"❌ Invalid key index: {index + 1}.")
                 
         elif subcommand == "show":
             if not gemini_keys:
