@@ -667,10 +667,10 @@ async def set_gemini_key(client: Client, message: Message):
             if not gemini_keys:
                 await message.edit_text("No Gemini API keys added yet.")
                 return
-            keys_list = "\n".join([f"**{i + 1}**: `{entry['key'][:10]}...`" for i, entry in enumerate(gemini_keys)])
-            current_key_display = f"**{current_key_index + 1}** (`{gemini_keys[current_key_index]['key'][:10]}...`)"
+            keys_list = "\n".join([f"{i + 1}: `{entry['key'][:10]}...`" for i, entry in enumerate(gemini_keys)])
+            current_key_display = f"{current_key_index + 1} "
             await message.edit_text(
-                f"🔑 **Gemini API keys:**\n\n{keys_list}\n\n➡️ **Current key:** {current_key_display}"
+                f"🔑 **Gemini API keys:**\n\n{keys_list}\n\n➡️ Current key: {current_key_display}"
             )
 
     except Exception as e:
