@@ -615,45 +615,76 @@ async def roleswitch_command(client: Client, message: Message):
 @Client.on_message(filters.command("setgkey", prefix) & filters.me)
 async def set_gemini_key(client: Client, message: Message):
     try:
-        command = message.text.strip().split()
-        subcommand, key = command[1] if len(command) > 1 else None, command[2] if len(command) > 2 else None
+        # Use split(maxsplit=2) to handle commands like: !setgkey add AIzaSy...key with spaces...
+        parts = message.text.strip().split(maxsplit=2) 
+        
+        # Determine subcommand (e.g., 'add', 'set', 'del', 'show')
+        subcommand = parts[1].lower() if len(parts) > 1 else None
+        
+        # key_arg contains the argument after the subcommand (either a key string or an index number)
+        key_arg = parts[2].strip() if len(parts) > 2 else None 
 
         gemini_keys = get_gemini_keys()
         current_key_index = db.get(collection, "current_key_index") or 0
 
-        if subcommand == "add" and key:
-            if add_gemini_key(key):
+        # --- Subcommand Logic ---
+
+        if subcommand == "add" and key_arg:
+            # key_arg holds the full key string.
+            if add_gemini_key(key_arg):
                 await message.edit_text("✅ New Gemini API key added.")
             else:
                 await message.edit_text("⚠️ This Gemini API key already exists.")
-        elif subcommand == "set" and key:
-            index = int(key) - 1
+                
+        elif subcommand == "set" and key_arg:
+            try:
+                index = int(key_arg) - 1 # Convert 1-based index to 0-based
+            except ValueError:
+                await message.edit_text(f"❌ Invalid index: `{key_arg}`. Must be a number.")
+                return
+                
             if 0 <= index < len(gemini_keys):
                 db.set(collection, "current_key_index", index)
-                await message.edit_text(f"✅ Current Gemini API key set to key **{key}**.")
+                await message.edit_text(f"✅ Current Gemini API key set to key **{index + 1}**.")
             else:
-                await message.edit_text(f"❌ Invalid key index: {key}.")
-        elif subcommand == "del" and key:
-            index = int(key) - 1
+                await message.edit_text(f"❌ Invalid key index: **{index + 1}**.")
+                
+        elif subcommand == "del" and key_arg:
+            try:
+                index = int(key_arg) - 1 # Convert 1-based index to 0-based
+            except ValueError:
+                await message.edit_text(f"❌ Invalid index: `{key_arg}`. Must be a number.")
+                return
+                
             if 0 <= index < len(gemini_keys):
-                gemini_keys.pop(index)
+                # Ensure we are deleting a string key, as your helpers only deal with strings
+                gemini_keys.pop(index) 
                 save_gemini_keys(gemini_keys)
+                
+                # Adjust the current key index if the deleted key was the current one
                 if current_key_index >= len(gemini_keys):
                     db.set(collection, "current_key_index", max(0, len(gemini_keys) - 1))
-                await message.edit_text(f"✅ Gemini API key {key} deleted.")
+                    
+                await message.edit_text(f"✅ Gemini API key **{index + 1}** deleted.")
             else:
-                await message.edit_text(f"❌ Invalid key index: {key}.")
+                await message.edit_text(f"❌ Invalid key index: **{index + 1}**.")
+                
         elif subcommand == "show":
             if not gemini_keys:
                 await message.edit_text("No Gemini API keys available.")
             else:
+                # Send full keys to "Saved Messages" for security
                 keys_list = "\n".join([f"**{i + 1}**: `{key}`" for i, key in enumerate(gemini_keys)])
                 await client.send_message("me", f"🔑 **Full Gemini API Keys:**\n\n{keys_list}")
                 await message.edit_text("Full API keys sent to saved messages.")
+                
+        # If no subcommand, show the list of keys (default behavior)
         else:
             if not gemini_keys:
-                 await message.edit_text("No Gemini API keys added yet.")
-                 return
+                await message.edit_text("No Gemini API keys added yet.")
+                return
+                
+            # Show keys, truncated to 10 characters for display
             keys_list = "\n".join(
                 [f"**{i + 1}**: `{key[:10]}...`" for i, key in enumerate(gemini_keys)]
             )
@@ -663,7 +694,10 @@ async def set_gemini_key(client: Client, message: Message):
             )
 
     except Exception as e:
+        # Send error to 'me' chat for debugging
         await client.send_message("me", f"An error occurred in the `setgkey` command:\n\n{str(e)}")
+        # Edit the original message to notify the user
+        await message.edit_text(f"❌ An error occurred while running `setgkey`.")
 
 @Client.on_message(filters.command("setgmodel", prefix) & filters.me)
 async def set_gemini_model(client: Client, message: Message):
