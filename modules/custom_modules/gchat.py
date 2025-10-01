@@ -46,6 +46,7 @@ enabled_users = db.get(collection, "enabled_users") or []
 disabled_users = db.get(collection, "disabled_users") or []
 gchat_for_all = db.get(collection, "gchat_for_all") or False
 mark_as_read_enabled = db.get(collection, "mark_as_read_enabled") or False
+elevenlabs_enabled = db.get(collection, "elevenlabs_enabled") or False
 
 # A single model for the entire system
 gmodel_name = db.get(collection, "gmodel_name") or "gemini-2.0-flash"
@@ -191,23 +192,29 @@ async def upload_file_to_gemini(file_path, file_type):
     return uploaded_file
 
 async def handle_voice_message(client, chat_id, bot_response, message_id):
-    if bot_response.startswith(".el"):
-        try:
-            audio_path = await generate_elevenlabs_audio(text=bot_response[3:])
-            if audio_path:
-                await client.send_voice(chat_id=chat_id, voice=audio_path)
-                await asyncio.sleep(random.uniform(0.5, 2.0))
-                if mark_as_read_enabled:
-                    await client.read_chat_history(chat_id=chat_id, max_id=message_id)
-                os.remove(audio_path)
-                return True
-        except Exception as e:
-            bot_response = bot_response[3:].strip()
-            await client.send_message(chat_id, bot_response)
+    global elevenlabs_enabled
+    # CHECK: Only proceed if the feature is globally enabled AND the message starts with the trigger
+    if not elevenlabs_enabled or not bot_response.startswith(".el"):
+        return False
+
+    try:
+        # Existing logic for generating and sending voice
+        audio_path = await generate_elevenlabs_audio(text=bot_response[3:])
+        if audio_path:
+            await client.send_voice(chat_id=chat_id, voice=audio_path)
             await asyncio.sleep(random.uniform(0.5, 2.0))
             if mark_as_read_enabled:
                 await client.read_chat_history(chat_id=chat_id, max_id=message_id)
+            os.remove(audio_path)
             return True
+    except Exception as e:
+        # Fallback to text message on failure
+        bot_response = bot_response[3:].strip()
+        await client.send_message(chat_id, bot_response)
+        await asyncio.sleep(random.uniform(0.5, 2.0))
+        if mark_as_read_enabled:
+            await client.read_chat_history(chat_id=chat_id, max_id=message_id)
+        return True
     return False
 
 # Persistent Queue Helper Functions for Users
@@ -698,7 +705,19 @@ async def set_gemini_model(client: Client, message: Message):
         await client.send_message(
             "me", f"An error occurred in `setgmodel` command:\n\n{str(e)}"
         )
+@Client.on_message(filters.command("gchatel", prefix) & filters.me)
+async def toggle_elevenlabs(client: Client, message: Message):
+    global elevenlabs_enabled
+    try:
+        # Toggle the current setting
+        elevenlabs_enabled = not elevenlabs_enabled
+        db.set(collection, "elevenlabs_enabled", elevenlabs_enabled)
+        
+        status = "enabled" if elevenlabs_enabled else "disabled"
+        await message.edit_text(f"🎙️ **ElevenLabs Voice Generation is now {status}.**")
 
+    except Exception as e:
+        await client.send_message("me", f"An error occurred in the `gchatel` command:\n\n{str(e)}")
 
 modules_help["gchat"] = {
     "gchat on/off [user_id]": "Enable or disable gchat for a user.",
@@ -712,6 +731,7 @@ modules_help["gchat"] = {
     "rolex [user_id] <prompt>": "Set a custom secondary role for a user.",
     "rolex [user_id]": "Toggle a specific user between their primary/secondary roles.",
     "gread": "Toggle the 'mark as read' feature (disabled by default).",
+    "gchatel": "Toggle the ElevenLabs voice generation feature (disabled by default).",
     "setgkey add <key>": "Add a new Gemini API key.",
     "setgkey set <index>": "Set the active Gemini API key.",
     "setgkey del <index>": "Delete a Gemini API key.",
