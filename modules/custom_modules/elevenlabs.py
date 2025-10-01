@@ -147,10 +147,6 @@ async def elevenlabs_command(client: Client, message: Message):
     """
     Handle the ElevenLabs text-to-speech command.
     """
-    feature_status = db.get("custom.elevenlabs", "enabled", True)
-    if not feature_status:
-        return await message.edit_text("⚠️ ElevenLabs feature is currently disabled.")
-
     original_audio_path = None
     processed_audio_path = None
     try:
@@ -190,10 +186,6 @@ async def elevenlabs_video_command(client: Client, message: Message):
     """
     Generate ElevenLabs audio and convert it to an MP4 video with minimal size.
     """
-    feature_status = db.get("custom.elevenlabs", "enabled", True)
-    if not feature_status:
-        return await message.edit_text("⚠️ ElevenLabs feature is currently disabled.")
-
     audio_path = None
     video_path = None
 
@@ -242,49 +234,40 @@ async def elevenlabs_video_command(client: Client, message: Message):
                 except Exception as cleanup_error:
                     print(f"Cleanup error: {cleanup_error}")
 
-
 @Client.on_message(filters.command(["set_elevenlabs", "setel"], prefix) & filters.me)
-async def set_elevenlabs_config(_, message: Message):
+async def set_elevenlabs_config(client: Client, message: Message):
     """
     Configure ElevenLabs settings using centralized key management.
     """
     args = message.command
-    
     api_keys = get_elevenlabs_keys()
     current_key_index = db.get("custom.elevenlabs", "current_key_index", 0)
 
     if len(args) == 1:
         current_values = {key: db.get("custom.elevenlabs", key, DEFAULT_PARAMS[key]) for key in DEFAULT_PARAMS}
-        feature_status = db.get("custom.elevenlabs", "enabled", True)
         
         if current_key_index >= len(api_keys) and api_keys:
             current_key_index = 0
             db.set("custom.elevenlabs", "current_key_index", 0)
 
+        keys_list = "\n".join([f"**{i + 1}**: `{entry['key']}`{' (current)' if i == current_key_index else ''}" for i, entry in enumerate(api_keys)])
         response = (
             "**ElevenLabs Configuration**\n\n"
-            f"🔑 **API Keys ({len(api_keys)})**:\n"
-            + "\n".join([f"{i+1}. `{key[:8]}...`{' (current)' if i == current_key_index else ''}" for i, key in enumerate(api_keys)])
-            + "\n\n⚙️ **Parameters**:\n"
+            f"🔑 **API Keys ({len(api_keys)})**:\n{keys_list or 'No keys added'}\n\n"
+            f"⚙️ **Parameters**:\n"
             + "\n".join([f"• `{key}`: `{value}`" for key, value in current_values.items()])
-            + f"\n\n**Feature Status**: {'Enabled' if feature_status else 'Disabled'}\n\n"
-            f"**Commands**:\n"
-     
-            f"`{prefix}setel on` - Enable the ElevenLabs feature\n"
-            f"`{prefix}setel off` - Disable the ElevenLabs feature"
+            + f"\n\n**Commands**:\n"
+            f"`{prefix}setel add <key>` - Add new API key\n"
+            f"`{prefix}setel del <num>` - Delete API key by number\n"
+            f"`{prefix}setel set <num>` - Set active API key\n"
+            f"`{prefix}setel voice_id <id>` - Set voice id\n"
+            f"`{prefix}setel stability <value>` - Set stability (0.0 to 1.0)\n"
+            f"`{prefix}setel similarity_boost <value>` - Set similarity boost (0.0 to 1.0)"
         )
         return await message.edit_text(response, parse_mode=enums.ParseMode.MARKDOWN)
 
     action = args[1].lower()
 
-    if action == "on":
-        db.set("custom.elevenlabs", "enabled", True)
-        return await message.edit_text("✅ ElevenLabs feature has been enabled.")
-
-    if action == "off":
-        db.set("custom.elevenlabs", "enabled", False)
-        return await message.edit_text("✅ ElevenLabs feature has been disabled.")
-    
     if action == "add" and len(args) >= 3:
         new_key = " ".join(args[2:])
         if add_elevenlabs_key(new_key):
@@ -298,10 +281,9 @@ async def set_elevenlabs_config(_, message: Message):
             if 0 <= index < len(api_keys):
                 deleted = api_keys.pop(index)
                 save_elevenlabs_keys(api_keys)
-                
                 if current_key_index >= len(api_keys):
                     db.set("custom.elevenlabs", "current_key_index", max(0, len(api_keys)-1))
-                return await message.edit_text(f"✅ Deleted key: `{deleted[:8]}...`")
+                return await message.edit_text(f"✅ Deleted key: `{deleted['key']}`")
             return await message.edit_text("❌ Invalid key number")
         except ValueError:
             return await message.edit_text("❌ Invalid key number")
@@ -333,13 +315,12 @@ async def set_elevenlabs_config(_, message: Message):
         await message.edit_text(f"✅ Updated `{key}` to `{value}`")
     else:
         await message.edit_text("❌ Invalid parameter")
-
+        
 
 modules_help["elevenlabs"] = {
     "el [text]*": "Generate voice message using ElevenLabs",
     "vl [text]*": "Generate a video note with ElevenLabs audio",
     "setel": "Show configuration",
-    "setel on/off": "Enable or Disable Elevenlabs",
     "setel add <key>": "Add new API key to central DB",
     "setel del <num>": "Delete API key by number from central DB",
     "setel set <num>": "Set active API key",
