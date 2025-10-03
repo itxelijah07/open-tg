@@ -104,7 +104,10 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
                 current_key_index = 0
                 db.set(collection, "current_key_index", current_key_index)
 
-            current_key = gemini_keys[current_key_index]
+            # FIX: Extract the actual key string from the object
+            current_key_obj = gemini_keys[current_key_index]
+            current_key = current_key_obj["key"] if isinstance(current_key_obj, dict) else current_key_obj
+            
             genai.configure(api_key=current_key)
 
             model = genai.GenerativeModel(model_name)
@@ -125,7 +128,7 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
                 current_key_index = (current_key_index + 1) % len(gemini_keys)
                 db.set(collection, "current_key_index", current_key_index)
             elif "429" in error_str or "invalid" in error_str or "blocked" in error_str:
-                await client.send_message("me", f"🔄 Key {current_key_index} failed, switching...")
+                await client.send_message("me", f"🔄 Key {current_key_index + 1} failed, switching...")
                 current_key_index = (current_key_index + 1) % len(gemini_keys)
                 db.set(collection, "current_key_index", current_key_index)
                 await asyncio.sleep(4)
@@ -139,7 +142,7 @@ async def _call_gemini_api(client: Client, input_data, user_id: int, model_name:
 
     await client.send_message("me", "❌ All API keys failed.")
     raise Exception("All Gemini API keys failed.")
-
+    
 def get_api_keys_db():
     """Get connection to separate API Keys database"""
     client = pymongo.MongoClient(config.db_url)
