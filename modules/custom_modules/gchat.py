@@ -196,29 +196,42 @@ async def upload_file_to_gemini(file_path, file_type):
 
 async def handle_voice_message(client, chat_id, bot_response, message_id):
     global elevenlabs_enabled
-    # CHECK: Only proceed if the feature is globally enabled AND the message starts with the trigger
+
+    # Only handle messages starting with ".el" if feature is enabled
     if not elevenlabs_enabled or not bot_response.startswith(".el"):
         return False
 
+    # Remove the trigger early
+    text = bot_response[3:].strip()
+
     try:
-        # Existing logic for generating and sending voice
-        audio_path = await generate_elevenlabs_audio(text=bot_response[3:])
-        if audio_path:
-            await client.send_voice(chat_id=chat_id, voice=audio_path)
+        # Generate audio from ElevenLabs
+        audio_path = await generate_elevenlabs_audio(text=text)
+
+        # If no audio generated, fall back to text
+        if not audio_path:
+            await client.send_message(chat_id, text)
             await asyncio.sleep(random.uniform(0.5, 2.0))
             if mark_as_read_enabled:
                 await client.read_chat_history(chat_id=chat_id, max_id=message_id)
-            os.remove(audio_path)
             return True
+
+        # Send voice message if audio generated
+        await client.send_voice(chat_id=chat_id, voice=audio_path)
+        await asyncio.sleep(random.uniform(0.5, 2.0))
+        if mark_as_read_enabled:
+            await client.read_chat_history(chat_id=chat_id, max_id=message_id)
+        os.remove(audio_path)
+        return True
+
     except Exception as e:
-        # Fallback to text message on failure
-        bot_response = bot_response[3:].strip()
-        await client.send_message(chat_id, bot_response)
+        # On error, send plain text instead of voice
+        await client.send_message(chat_id, text)
         await asyncio.sleep(random.uniform(0.5, 2.0))
         if mark_as_read_enabled:
             await client.read_chat_history(chat_id=chat_id, max_id=message_id)
         return True
-    return False
+
 
 # Persistent Queue Helper Functions for Users
 def load_user_message_queue(user_id):
