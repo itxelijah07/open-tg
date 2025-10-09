@@ -63,9 +63,7 @@ def save_gemini_keys(keys_list):
         print(f"Error saving gemini keys: {e}")
 
 def get_global_gmodel_name():
-    """Get the single global model name from gchat's collection"""
-    # Fetches from custom.gchat collection, which is set by the .setgmodel/.setwmodel command
-    return db.get("custom.gchat", "gmodel_name") or "gemini-2.0-flash"
+    return db.get("custom.wchat", "gmodel_name") or "gemini-2.0-flash"
 
 # --- END: Centralized API Key Management & Global Config Helpers ---
 
