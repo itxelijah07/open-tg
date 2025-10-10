@@ -614,7 +614,7 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
         
         db.set(collection, f"chat_history.{user_id}", None)
         await client.send_message("me", f"✅ Switched user `{user_id}` to their **{role_type}** role.")
-
+        await message.delete()
     except Exception as e:
         await client.send_message("me", f"An error occurred in the `rolex` command:\n\n{str(e)}")
 
