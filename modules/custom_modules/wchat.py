@@ -1,19 +1,22 @@
 import asyncio
 import os
 import random
+from collections import defaultdict, deque
+from PIL import Image
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
-from utils.scripts import import_library
-from utils.db import db
-from utils.misc import modules_help, prefix
-from modules.custom_modules.elevenlabs import generate_elevenlabs_audio
-from PIL import Image
-from collections import defaultdict, deque
-import datetime
 import pytz
+from datetime import datetime
 import pymongo
 from utils import config
+from utils.db import db
+from utils.misc import modules_help, prefix
+from utils.scripts import import_library
+from modules.custom_modules.elevenlabs import generate_elevenlabs_audio
 from pyrogram.errors import FloodWait
+
+# --- DATABASE CONSTANTS ---
+COLLECTION_NAME = "custom.wchat" 
 
 # Initialize Gemini AI
 genai = import_library("google.generativeai", "google-generativeai")
@@ -28,46 +31,7 @@ safety_settings = [
     ]
 ]
 
-# --- START: Centralized API Key Management & Global Config Helpers (Adopted from gchat.py) ---
-def get_api_keys_db():
-    """Get connection to separate API Keys database"""
-    client = pymongo.MongoClient(config.db_url)
-    return client["ApiKeys"]
-
-def get_gemini_keys():
-    """Get Gemini API keys from centralized Api Keys database"""
-    try:
-        api_db = get_api_keys_db()
-        result = api_db["gemini_keys"].find_one({"type": "keys"})
-        if result is None:
-            api_db["gemini_keys"].insert_one({"type": "keys", "keys": []})
-            return []
-        # Keys are stored as a list of dicts: [{"key": "...", "name": null}, ...]
-        return [entry.get("key") for entry in result.get("keys", []) if entry.get("key")]
-    except Exception as e:
-        print(f"Error getting gemini keys: {e}")
-        return []
-
-def save_gemini_keys(keys_list):
-    """Save Gemini API keys to centralized Api Keys database"""
-    try:
-        api_db = get_api_keys_db()
-        # Ensure keys are stored as list of dicts for consistency
-        keys_data = [{"key": k, "name": None} for k in keys_list]
-        api_db["gemini_keys"].update_one(
-            {"type": "keys"},
-            {"$set": {"keys": keys_data}},
-            upsert=True
-        )
-    except Exception as e:
-        print(f"Error saving gemini keys: {e}")
-
-def get_global_gmodel_name():
-    return db.get("custom.wchat", "gmodel_name") or "gemini-2.0-flash"
-
-# --- END: Centralized API Key Management & Global Config Helpers ---
-
-# Default bot role and database collection
+# Default bot roles
 default_bot_role = ("You are Nick, a 20-year-old from Phoenix, working in real estate. "
                     "You are confident, caring, romantic, and bold. Your goal is to build a long-distance relationship, win her over, and make her yours. "
                     "Be straightforward and open about your feelings, expressing your affection with charm and confidence. "
@@ -90,46 +54,165 @@ default_secondary_role = ("You're nick, smart, romantic, bold, and caring and ex
                          "Be bold and open about your feelings. Show love, romance (sexting) make her feel special, and keep the conversations romantic, fun, and sexual. "
                          "Slowly start sexting and fuck her. Rarely use emojis.")
 
-collection = "custom.wchat"
+# --- CORE DB FUNCTIONS FOR NESTED STRUCTURE ---
 
-# Database initialization
-enabled_topics = db.get(collection, "enabled_topics") or []
-disabled_topics = db.get(collection, "disabled_topics") or []
-wchat_for_all_groups = db.get(collection, "wchat_for_all_groups") or {}
-group_roles = db.get(collection, "group_roles") or {}
-elevenlabs_enabled = db.get(collection, "elevenlabs_enabled") or False
+def get_nested(data, keys, default=None):
+    """Safely retrieves a value from a nested dictionary."""
+    if data is None:
+        return default
+    
+    current = data
+    for key in keys:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return default
+    return current
+
+def set_nested(data, keys, value):
+    """Safely sets a value in a nested dictionary."""
+    if data is None:
+        return {}
+
+    current = data
+    for i, key in enumerate(keys):
+        if i == len(keys) - 1:
+            current[key] = value
+        elif key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+        current = current[key]
+    return data
+
+def get_module_data():
+    """Fetches the entire module's configuration document."""
+    return db.get(COLLECTION_NAME, "config") or {}
+
+def save_module_data(data):
+    """Saves the entire module's configuration document."""
+    db.set(COLLECTION_NAME, "config", data)
+
+def get_topic_data(topic_id: str):
+    """Retrieves config for a specific topic (role, enabled status)."""
+    data = get_module_data()
+    return get_nested(data, ["topics", topic_id]) or {}
+
+def save_topic_data_field(topic_id: str, field: str, value):
+    """Saves a single field for a topic."""
+    data = get_module_data()
+    set_nested(data, ["topics", topic_id, field], value)
+    save_module_data(data)
+
+def get_group_config(group_id: str):
+    """Retrieves config for a specific group (group role, enabled all)."""
+    data = get_module_data()
+    return get_nested(data, ["groups", group_id]) or {}
+
+def save_group_config_field(group_id: str, field: str, value):
+    """Saves a single field for a group."""
+    data = get_module_data()
+    set_nested(data, ["groups", group_id, field], value)
+    save_module_data(data)
+
+def get_global_config_field(field: str, default=None):
+    """Retrieves a field from global settings."""
+    data = get_module_data()
+    return get_nested(data, ["global", field], default)
+
+def save_global_config_field(field: str, value):
+    """Saves a field to global settings."""
+    data = get_module_data()
+    set_nested(data, ["global", field], value)
+    save_module_data(data)
+
+# Global state loaded from DB
+elevenlabs_enabled = get_global_config_field("elevenlabs_enabled", False)
+gmodel_name = get_global_config_field("gmodel_name") or "gemini-2.0-flash"
 
 
-def get_chat_history(topic_id, bot_role, user_message, user_name):
-    # Determine the role key based on whether a custom topic role exists, or fallback to the group role, then default.
-    role_content_key = f"custom_roles.{topic_id}"
-    effective_role_content = db.get(collection, role_content_key) or group_roles.get(topic_id.split(":")[0]) or default_bot_role
+# --- API KEY HELPERS (Unchanged, uses central ApiKeys DB) ---
 
-    # The role in history should be the current effective role content.
+def get_api_keys_db():
+    client = pymongo.MongoClient(config.db_url)
+    return client["ApiKeys"]
+
+def get_gemini_keys():
+    try:
+        api_db = get_api_keys_db()
+        result = api_db["gemini_keys"].find_one({"type": "keys"})
+        if result is None:
+            api_db["gemini_keys"].insert_one({"type": "keys", "keys": []})
+            return []
+        return [entry.get("key") for entry in result.get("keys", []) if entry.get("key")]
+    except Exception as e:
+        print(f"Error getting gemini keys: {e}")
+        return []
+
+def save_gemini_keys(keys_list):
+    try:
+        api_db = get_api_keys_db()
+        keys_data = [{"key": k, "name": None} for k in keys_list]
+        api_db["gemini_keys"].update_one(
+            {"type": "keys"},
+            {"$set": {"keys": keys_data}},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"Error saving gemini keys: {e}")
+
+# --- ROLE AND HISTORY LOGIC ---
+
+def get_effective_bot_role(group_id: str, topic_id: str) -> str:
+    """Determines the correct, active role based on the cascading logic."""
+    topic_data = get_topic_data(topic_id)
+    group_config = get_group_config(group_id)
+
+    # 1. Active Role (last role set/toggled)
+    if topic_data.get("role_active"):
+        return topic_data["role_active"]
+
+    # 2. Custom Topic Role (set by !grole <role>)
+    if topic_data.get("role_primary"):
+        return topic_data["role_primary"]
+    
+    # 3. Custom Group Role (set by !grole group <role>)
+    if group_config.get("role_primary"):
+        return group_config["role_primary"]
+    
+    # 4. Default Role
+    return default_bot_role
+
+
+def get_chat_history(topic_id, user_message, user_name):
+    """Loads, updates, and limits chat history, and returns the current effective role."""
+    data = get_module_data()
+    group_id = topic_id.split(':')[0]
+    
+    effective_role_content = get_effective_bot_role(group_id, topic_id)
     initial_role_entry = f"Role: {effective_role_content}"
 
-    chat_history = db.get(collection, f"chat_history.{topic_id}")
-    if not isinstance(chat_history, list) or not chat_history or chat_history[0] != initial_role_entry:
+    chat_history = get_nested(data, ["topics", topic_id, "history"], [])
+
+    if not chat_history or chat_history[0] != initial_role_entry:
         chat_history = [initial_role_entry]
 
     chat_history.append(f"{user_name}: {user_message}")
 
-    # History limiting logic (adopted from gchat.py)
-    global_history_limit = db.get(collection, "history_limit")
+    global_history_limit = get_global_config_field("history_limit")
     if global_history_limit:
-        # Keep the role as the first element, then limit the rest
         max_history_length = int(global_history_limit) + 1
         if len(chat_history) > max_history_length:
             chat_history = [chat_history[0]] + chat_history[-(max_history_length-1):]
 
-    db.set(collection, f"chat_history.{topic_id}", chat_history)
-    return chat_history
+    set_nested(data, ["topics", topic_id, "history"], chat_history)
+    save_module_data(data)
+    
+    return chat_history, effective_role_content
 
+# --- UTILITIES ---
 
-# Utility function to build Gemini prompt
 def build_gemini_prompt(bot_role, chat_history_list, user_message, file_description=None):
     phoenix_timezone = pytz.timezone('America/Phoenix')
-    phoenix_time = datetime.datetime.now(phoenix_timezone)
+    phoenix_time = datetime.now(phoenix_timezone)
     timestamp = phoenix_time.strftime("%Y-%m-%d %H:%M:%S %Z")
     chat_history_text = "\n".join(chat_history_list)
     prompt = f"""Current Time (Phoenix): {timestamp}\n\nRole:\n{bot_role}\n\nChat History:\n{chat_history_text}\n\nUser Current Message:\n{user_message}"""
@@ -144,35 +227,25 @@ async def send_typing_action(client, chat_id, user_message):
 async def handle_voice_message(client, chat_id, bot_response, thread_id=None):
     global elevenlabs_enabled
     
-    # Only handle messages starting with ".el" if feature is enabled
     if not elevenlabs_enabled or not bot_response.startswith(".el"):
         return False
 
-    # Remove the trigger early
     text = bot_response[3:].strip()
     if not text:
         return False
 
     try:
-        # Generate audio from ElevenLabs
         audio_path = await generate_elevenlabs_audio(text=text)
 
-        # If no audio generated, fall back to text
         if not audio_path:
-            # Fallback to text message
             if thread_id:
-                await client.send_message(
-                    chat_id=chat_id, text=text, message_thread_id=thread_id
-                )
+                await client.send_message(chat_id=chat_id, text=text, message_thread_id=thread_id)
             else:
                 await client.send_message(chat_id, text)
             return True
 
-        # Send voice message if audio generated
         if thread_id:
-            await client.send_voice(
-                chat_id=chat_id, voice=audio_path, message_thread_id=thread_id
-            )
+            await client.send_voice(chat_id=chat_id, voice=audio_path, message_thread_id=thread_id)
         else:
             await client.send_voice(chat_id=chat_id, voice=audio_path)
         
@@ -180,14 +253,9 @@ async def handle_voice_message(client, chat_id, bot_response, thread_id=None):
         return True
     
     except Exception as e:
-        await client.send_message(
-            "me", f"❌ Error generating audio with ElevenLabs: {str(e)}. Falling back to text message."
-        )
-        # Fallback to text message on error
+        await client.send_message("me", f"❌ Error generating audio with ElevenLabs: {str(e)}. Falling back to text message.")
         if thread_id:
-            await client.send_message(
-                chat_id=chat_id, text=text, message_thread_id=thread_id
-            )
+            await client.send_message(chat_id=chat_id, text=text, message_thread_id=thread_id)
         else:
             await client.send_message(chat_id, text)
         return True
@@ -199,23 +267,20 @@ async def _call_gemini_api(client: Client, input_data, topic_id: str, model_name
         await client.send_message("me", f"❌ Error: No Gemini API keys found for topic {topic_id}. Cannot get model.")
         raise ValueError("No Gemini API keys configured. Please add keys using .setwkey add <key>")
 
-    current_key_index = db.get(collection, "current_key_index") or 0
+    current_key_index = get_global_config_field("key_index", 0)
     initial_key_index = current_key_index
     retries_per_key = 2
     total_retries = len(gemini_keys) * retries_per_key
 
     for attempt in range(total_retries):
         try:
-            # Ensure key index is valid
             if not (0 <= current_key_index < len(gemini_keys)):
                 current_key_index = 0
-                db.set(collection, "current_key_index", current_key_index)
+                save_global_config_field("key_index", current_key_index)
 
-            # Get the actual key string
             current_key = gemini_keys[current_key_index]
             
             genai.configure(api_key=current_key)
-
             model = genai.GenerativeModel(model_name)
             model.safety_settings = safety_settings
             
@@ -231,11 +296,11 @@ async def _call_gemini_api(client: Client, input_data, topic_id: str, model_name
                 await client.send_message("me", f"⏳ Rate limited, switching key...")
                 await asyncio.sleep(e.value + 1)
                 current_key_index = (current_key_index + 1) % len(gemini_keys)
-                db.set(collection, "current_key_index", current_key_index)
+                save_global_config_field("key_index", current_key_index)
             elif "429" in error_str or "invalid" in error_str or "blocked" in error_str or "quota" in error_str:
                 await client.send_message("me", f"🔄 Key {current_key_index + 1} failed, switching...")
                 current_key_index = (current_key_index + 1) % len(gemini_keys)
-                db.set(collection, "current_key_index", current_key_index)
+                save_global_config_field("key_index", current_key_index)
                 await asyncio.sleep(4)
             else:
                 await client.send_message("me", f"❌ Unexpected API error for topic {topic_id} (key index {current_key_index}): {str(e)}")
@@ -243,7 +308,7 @@ async def _call_gemini_api(client: Client, input_data, topic_id: str, model_name
                     raise e
                 else:
                     current_key_index = (current_key_index + 1) % len(gemini_keys)
-                    db.set(collection, "current_key_index", current_key_index)
+                    save_global_config_field("key_index", current_key_index)
                     await asyncio.sleep(2)
 
     await client.send_message("me", f"❌ All API keys failed after {total_retries} attempts for topic {topic_id}.")
@@ -258,21 +323,27 @@ async def upload_file_to_gemini(file_path, file_type):
         raise ValueError(f"{file_type.capitalize()} failed to process.")
     return uploaded_file
 
-# Persistent Queue Helper Functions for Group Topics
 def load_group_message_queue(topic_id):
-    data = db.get(collection, f"group_message_queue.{topic_id}")
+    data = get_module_data()
+    data = get_nested(data, ["topics", topic_id, "queue"])
     return deque(data) if data else deque()
 
 def save_group_message_to_db(topic_id, message_text):
-    queue = db.get(collection, f"group_message_queue.{topic_id}") or []
+    data = get_module_data()
+    queue = get_nested(data, ["topics", topic_id, "queue"], [])
     queue.append(message_text)
-    db.set(collection, f"group_message_queue.{topic_id}", queue)
+    set_nested(data, ["topics", topic_id, "queue"], queue)
+    save_module_data(data)
 
 def clear_group_message_queue(topic_id):
-    db.set(collection, f"group_message_queue.{topic_id}", None)
+    data = get_module_data()
+    set_nested(data, ["topics", topic_id, "queue"], []) 
+    save_module_data(data)
 
 group_message_queues = defaultdict(deque)
 active_topics = set()
+
+# --- MESSAGE HANDLERS ---
 
 @Client.on_message(filters.text & filters.group & ~filters.me, group=1)
 async def wchat(client: Client, message: Message):
@@ -282,8 +353,14 @@ async def wchat(client: Client, message: Message):
         topic_id = f"{group_id}:{thread_id_str}"
         user_name = message.from_user.first_name if message.from_user else "User"
         user_message = message.text.strip()
+        
+        topic_data = get_topic_data(topic_id)
+        group_config = get_group_config(group_id)
 
-        if topic_id in disabled_topics or (not wchat_for_all_groups.get(group_id, False) and topic_id not in enabled_topics):
+        # Enable/Disable Check
+        if topic_data.get("enabled") is False:
+            return
+        if topic_data.get("enabled") is not True and not group_config.get("enabled_all", False):
             return
         
         if user_message.startswith("Reacted to this message with"):
@@ -305,32 +382,24 @@ async def wchat(client: Client, message: Message):
 
 async def process_group_messages(client, message, topic_id, user_name):
     try:
-        model_to_use = get_global_gmodel_name()
+        model_to_use = gmodel_name
         
         while group_message_queues[topic_id]:
             delay = random.choice([4, 6, 8])
             await asyncio.sleep(delay)
 
             batch = []
-            # Pop up to 2 messages to form a batch
             for _ in range(2):
                 if group_message_queues[topic_id]:
                     batch.append(group_message_queues[topic_id].popleft())
 
             if not batch:
-                break # No messages left in the batch, exit loop
+                break
 
             combined_message = " ".join(batch)
-            # Clear the persistent queue after processing the batch
             clear_group_message_queue(topic_id)
 
-            # --- Determine bot role (Original wchat logic) ---
-            group_id = topic_id.split(":")[0]
-            # Custom role for topic overrides group role, which overrides default role.
-            bot_role = db.get(collection, f"custom_roles.{topic_id}") or group_roles.get(group_id) or default_bot_role
-            # --- End Role Determination ---
-
-            chat_history_list = get_chat_history(topic_id, bot_role, combined_message, user_name)
+            chat_history_list, bot_role = get_chat_history(topic_id, combined_message, user_name)
             full_prompt = build_gemini_prompt(bot_role, chat_history_list, combined_message)
 
             await send_typing_action(client, message.chat.id, combined_message)
@@ -342,20 +411,23 @@ async def process_group_messages(client, message, topic_id, user_name):
                 bot_response = await _call_gemini_api(client, full_prompt, topic_id, model_to_use, chat_history_list)
                 
                 if len(bot_response) > max_length:
-                    bot_response = bot_response[:max_length] + "..." # Truncate if too long
+                    bot_response = bot_response[:max_length] + "..."
                     
-                chat_history_list.append(bot_response)
-                db.set(collection, f"chat_history.{topic_id}", chat_history_list)
+                data = get_module_data()
+                history = get_nested(data, ["topics", topic_id, "history"], [])
+                history.append(bot_response)
+                set_nested(data, ["topics", topic_id, "history"], history)
+                save_module_data(data)
 
-            except ValueError as ve: # Catch specific error from _call_gemini_api (e.g., no keys)
+            except ValueError as ve: 
                 await client.send_message("me", f"❌ Failed to get Gemini model for topic {topic_id}: {ve}")
-                break # Break out of processing loop if no model can be obtained
-            except Exception as e: # Catch other errors during message generation
+                break 
+            except Exception as e: 
                 await client.send_message("me", f"❌ Error generating response for topic {topic_id}: {str(e)}")
-                break # Break out of processing loop on other errors
+                break 
 
             if not bot_response or not isinstance(bot_response, str) or bot_response.strip() == "":
-                bot_response = "Sorry, I couldn't process that. Can you try again?" # Fallback response
+                bot_response = "Sorry, I couldn't process that. Can you try again?" 
                 await client.send_message(
                     "me",
                     f"❌ Invalid or empty bot_response for topic {topic_id}. Using fallback response."
@@ -364,15 +436,14 @@ async def process_group_messages(client, message, topic_id, user_name):
             if await handle_voice_message(client, message.chat.id, bot_response, message.message_thread_id):
                 continue
 
-            # Simulate typing action for a more human-like response delay
             response_length = len(bot_response)
-            char_delay = 0.03 # Delay per character
+            char_delay = 0.03
             total_delay = response_length * char_delay
 
             elapsed_time = 0
             while elapsed_time < total_delay:
                 await send_typing_action(client, message.chat.id, bot_response)
-                await asyncio.sleep(2) # Send typing action every 2 seconds
+                await asyncio.sleep(2) 
                 elapsed_time += 2
 
             await client.send_message(
@@ -381,53 +452,46 @@ async def process_group_messages(client, message, topic_id, user_name):
                 message_thread_id=message.message_thread_id,
             )
 
-        # Ensure active_topics is cleaned up when the queue is empty
         active_topics.discard(topic_id)
     except Exception as e:
-        # Critical error in processing group messages, send to saved messages
         await client.send_message("me", f"❌ Critical error in `process_group_messages` for topic {topic_id}: {str(e)}")
-        active_topics.discard(topic_id) # Ensure cleanup even on outer exceptions
+        active_topics.discard(topic_id) 
 
 
 @Client.on_message(filters.group & ~filters.me, group=2)
 async def handle_files(client: Client, message: Message):
     file_path = None
+    topic_id = None
     try:
         group_id = str(message.chat.id)
         thread_id_str = str(message.message_thread_id) if message.message_thread_id else "0"
         topic_id = f"{group_id}:{thread_id_str}"
         user_name = message.from_user.first_name if message.from_user else "User"
 
-        if topic_id in disabled_topics or (
-                not wchat_for_all_groups.get(group_id, False)
-                and topic_id not in enabled_topics
-        ):
+        topic_data = get_topic_data(topic_id)
+        group_config = get_group_config(group_id)
+
+        if topic_data.get("enabled") is False:
+            return
+
+        if topic_data.get("enabled") is not True and not group_config.get("enabled_all", False):
             return
             
         if message.caption and message.caption.strip().startswith("Reacted to this message with"):
             return
 
-        model_to_use = get_global_gmodel_name()
-
-        # --- Determine bot role (Original wchat logic) ---
-        group_id = str(message.chat.id)
-        bot_role = db.get(collection, f"custom_roles.{topic_id}") or group_roles.get(group_id) or default_bot_role
-        # --- End Role Determination ---
-
+        model_to_use = gmodel_name
         caption = message.caption.strip() if message.caption else ""
-        chat_history_list = get_chat_history(topic_id, bot_role, caption, user_name)
+        
+        chat_history_list, bot_role = get_chat_history(topic_id, caption, user_name)
 
         if message.photo:
-            if not hasattr(client, "image_buffer"):
-                client.image_buffer = {}
-                client.image_timers = {}
-
-            if topic_id not in client.image_buffer:
-                client.image_buffer[topic_id] = []
-                client.image_timers[topic_id] = None
+            
+            if not hasattr(client, "image_buffer"): client.image_buffer = {}; client.image_timers = {}
+            if topic_id not in client.image_buffer: client.image_buffer[topic_id] = []; client.image_timers[topic_id] = None
 
             image_path = await client.download_media(message.photo)
-            await asyncio.sleep(random.uniform(0.1, 0.5)) # Added delay
+            await asyncio.sleep(random.uniform(0.1, 0.5))
             client.image_buffer[topic_id].append(image_path)
 
             if client.image_timers[topic_id] is None:
@@ -437,24 +501,19 @@ async def handle_files(client: Client, message: Message):
                         image_paths = client.image_buffer.pop(topic_id, [])
                         client.image_timers[topic_id] = None
 
-                        if not image_paths:
-                            return
+                        if not image_paths: return
 
                         sample_images = []
                         for img_path in image_paths:
-                            try:
-                                sample_images.append(Image.open(img_path))
+                            try: sample_images.append(Image.open(img_path))
                             except Exception as img_open_e:
-                                await client.send_message(
-                                    "me", f"❌ Error opening image {img_path} for topic {topic_id}: {img_open_e}"
-                                )
-                                if os.path.exists(img_path):
-                                    os.remove(img_path)
-                        if not sample_images:
-                            return
+                                await client.send_message("me", f"❌ Error opening image {img_path} for topic {topic_id}: {img_open_e}")
+                                if os.path.exists(img_path): os.remove(img_path)
+                        if not sample_images: return
 
                         prompt_text = "User has sent multiple images." + (f" Caption: {caption}" if caption else "")
-                        full_prompt = build_gemini_prompt(bot_role, chat_history_list, prompt_text)
+                        bot_role_img = get_effective_bot_role(group_id, topic_id)
+                        full_prompt = build_gemini_prompt(bot_role_img, chat_history_list, prompt_text)
                         
                         input_data = [full_prompt] + sample_images
                         response = await _call_gemini_api(client, input_data, topic_id, model_to_use, chat_history_list)
@@ -465,8 +524,7 @@ async def handle_files(client: Client, message: Message):
                         await client.send_message("me", f"❌ Error processing images in group `handle_files` for topic {topic_id}: {str(e_image_process)}")
                     finally:
                         for img_path in image_paths:
-                            if os.path.exists(img_path):
-                                os.remove(img_path)
+                            if os.path.exists(img_path): os.remove(img_path)
 
                 client.image_timers[topic_id] = asyncio.create_task(process_images())
                 return
@@ -482,11 +540,13 @@ async def handle_files(client: Client, message: Message):
             file_type, file_path = ("document", await client.download_media(message.document))
 
         if file_path and file_type:
-            await asyncio.sleep(random.uniform(0.1, 0.5)) # Added delay
+            await asyncio.sleep(random.uniform(0.1, 0.5))
             try:
                 uploaded_file = await upload_file_to_gemini(file_path, file_type)
                 prompt_text = f"User has sent a {file_type}." + (f" Caption: {caption}" if caption else "")
-                full_prompt = build_gemini_prompt(bot_role, chat_history_list, prompt_text)
+                
+                bot_role_file = get_effective_bot_role(group_id, topic_id)
+                full_prompt = build_gemini_prompt(bot_role_file, chat_history_list, prompt_text)
                 
                 input_data = [full_prompt, uploaded_file]
                 response = await _call_gemini_api(client, input_data, topic_id, model_to_use, chat_history_list)
@@ -502,83 +562,72 @@ async def handle_files(client: Client, message: Message):
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
+# --- COMMAND HANDLERS ---
+
 @Client.on_message(filters.command(["wchat", "wc"], prefix) & filters.me)
 async def wchat_command(client: Client, message: Message):
     try:
-        parts = message.text.strip().split()
-        if len(parts) < 2:
+        parts = message.text.strip().split(maxsplit=2)
+        group_id = str(message.chat.id)
+        thread_id_str = str(message.message_thread_id or 0)
+        topic_id = f"{group_id}:{thread_id_str}"
+        
+        command = parts[1].lower() if len(parts) > 1 else None
+        arg2 = parts[2].lower() if len(parts) > 2 else None
+
+        if not command:
             await message.edit_text(
                 f"<b>Usage:</b> {prefix}wchat `on`, `off`, `del` [thread_id] or `{prefix}wchat all` or `{prefix}wchat history [number|off]`"
             )
             return
 
-        command = parts[1].lower()
-        group_id = str(message.chat.id)
-
         if command == "all":
-            wchat_for_all_groups[group_id] = not wchat_for_all_groups.get(group_id, False)
-            db.set(collection, "wchat_for_all_groups", wchat_for_all_groups)
+            group_config = get_group_config(group_id)
+            enabled_all = not group_config.get("enabled_all", False)
+            save_group_config_field(group_id, "enabled_all", enabled_all)
             await message.edit_text(
-                f"wchat is now {'enabled' if wchat_for_all_groups[group_id] else 'disabled'} for all topics in this group."
+                f"wchat is now {'enabled' if enabled_all else 'disabled'} for all topics in this group."
             )
             await asyncio.sleep(1)
             await message.delete()
             return
 
         if command == "history":
-            if len(parts) == 2:
-                current_limit = db.get(collection, "history_limit")
+            if not arg2:
+                current_limit = get_global_config_field("history_limit")
                 if current_limit:
                     await message.edit_text(f"Global history limit: last {current_limit} messages.")
                 else:
                     await message.edit_text("No global history limit set.")
-            elif len(parts) >= 3:
-                if parts[2].lower() == "off":
-                    db.set(collection, "history_limit", None)
+            else:
+                if arg2 == "off":
+                    save_global_config_field("history_limit", None)
                     await message.edit_text("History limit disabled.")
                 else:
                     try:
-                        num = int(parts[2])
-                        db.set(collection, "history_limit", num)
+                        num = int(arg2)
+                        save_global_config_field("history_limit", num)
                         await message.edit_text(f"Global history limit set to last {num} messages.")
                     except ValueError:
                         await message.edit_text("Invalid number for history limit.")
             return
 
-        if len(parts) >= 3:
-            provided_thread_id = parts[2]
-            if not provided_thread_id.isdigit():
-                await message.edit_text(
-                    f"<b>Invalid thread ID:</b> {provided_thread_id}. Please provide a numeric thread ID."
-                )
-                return
-            thread_id_str = provided_thread_id
-        else:
-            thread_id_str = str(message.message_thread_id or 0)
-
-        topic_id = f"{group_id}:{thread_id_str}"
-
+        target_topic_id = topic_id
+        if arg2 and arg2.isdigit():
+            target_topic_id = f"{group_id}:{arg2}"
+        
         if command == "on":
-            if topic_id in disabled_topics:
-                disabled_topics.remove(topic_id)
-                db.set(collection, "disabled_topics", disabled_topics)
-            if topic_id not in enabled_topics:
-                enabled_topics.append(topic_id)
-                db.set(collection, "enabled_topics", enabled_topics)
-            await message.edit_text(f"<b>wchat is enabled for topic {topic_id}.</b>")
+            save_topic_data_field(target_topic_id, "enabled", True)
+            await message.edit_text(f"<b>wchat is enabled for topic {target_topic_id}.</b>")
 
         elif command == "off":
-            if topic_id not in disabled_topics:
-                disabled_topics.append(topic_id)
-                db.set(collection, "disabled_topics", disabled_topics)
-            if topic_id in enabled_topics:
-                enabled_topics.remove(topic_id)
-                db.set(collection, "enabled_topics", enabled_topics)
-            await message.edit_text(f"<b>wchat is disabled for topic {topic_id}.</b>")
+            save_topic_data_field(target_topic_id, "enabled", False)
+            await message.edit_text(f"<b>wchat is disabled for topic {target_topic_id}.</b>")
 
         elif command == "del":
-            db.set(collection, f"chat_history.{topic_id}", None)
-            await message.edit_text(f"<b>Chat history deleted for topic {topic_id}.</b>")
+            save_topic_data_field(target_topic_id, "history", [])
+            save_topic_data_field(target_topic_id, "role_active", None)
+            await message.edit_text(f"<b>Chat history deleted for topic {target_topic_id}.</b>")
 
         else:
             await message.edit_text(
@@ -589,203 +638,179 @@ async def wchat_command(client: Client, message: Message):
         await message.delete()
 
     except Exception as e:
-        await client.send_message(
-            "me", f"❌ An error occurred in the `wchat` command:\n\n{str(e)}"
-        )
+        await client.send_message("me", f"❌ An error occurred in the `wchat` command:\n\n{str(e)}")
+
 
 @Client.on_message(filters.command("grole", prefix) & filters.group & filters.me)
 async def set_custom_role(client: Client, message: Message):
     try:
-        parts = message.text.strip().split()
-        if len(parts) < 2:
-            await message.edit_text(
-                f"Usage: {prefix}grole [group|topic] <custom role>\n"
-                f"Or for a specific topic: {prefix}grole topic <thread_id> <custom role>"
-            )
-            return
-
-        scope = parts[1].lower()
+        parts = message.text.strip().split(maxsplit=2) 
         group_id = str(message.chat.id)
-
-        if scope == "group":
-            custom_role = " ".join(parts[2:]).strip()
-            group_key = group_id
-            if not custom_role:
-                group_roles.pop(group_key, None) # Remove from primary group role
-                db.set(collection, "group_roles", group_roles)
-                db.set(collection, f"custom_roles.{group_key}:0", None) # Clear primary topic role
-                db.set(collection, f"chat_history.{group_key}:0", None)
-                await message.edit_text(f"Primary role reset to default for group {group_id}.")
-            else:
-                group_roles[group_key] = custom_role
-                db.set(collection, "group_roles", group_roles)
-                db.set(collection, f"custom_roles.{group_key}:0", None) # Ensure custom topic role is cleared to use the new group role
-                db.set(collection, f"chat_history.{group_key}:0", None)
-                await message.edit_text(
-                    f"Primary role set successfully for group {group_id}!\n<b>New Role:</b> {custom_role}"
-                )
-
-        elif scope == "topic":
-            thread_id_str = str(message.message_thread_id or 0)
-            role_parts = parts[2:]
+        
+        if len(parts) == 1:
+            await message.edit_text(f"Usage: {prefix}grole [group] <custom role>\nOmit 'group' to set the role for the current topic.")
+            return
             
-            if len(parts) >= 3 and parts[2].isdigit():
-                thread_id_str = parts[2]
-                role_parts = parts[3:]
+        scope_or_role_text = parts[1].strip()
+        custom_role = parts[2].strip() if len(parts) > 2 else ""
 
-            custom_role = " ".join(role_parts).strip()
-            topic_id = f"{group_id}:{thread_id_str}"
-
+        if scope_or_role_text.lower() == "group":
+            group_key = group_id
+            main_topic_id = f"{group_id}:0"
+            
             if not custom_role:
-                db.set(collection, f"custom_roles.{topic_id}", None)
-                db.set(collection, f"chat_history.{topic_id}", None)
-                await message.edit_text(
-                    f"Primary role reset to group's role for topic {topic_id}."
-                )
+                save_group_config_field(group_key, "role_primary", None)
+                save_topic_data_field(main_topic_id, "role_primary", None)
+                save_topic_data_field(main_topic_id, "role_active", None)
+                save_topic_data_field(main_topic_id, "history", [])
+                
+                response = f"Primary role reset to default for group {group_id}."
             else:
-                db.set(collection, f"custom_roles.{topic_id}", custom_role)
-                db.set(collection, f"chat_history.{topic_id}", None)
-                await message.edit_text(
-                    f"Primary role set successfully for topic {topic_id}!\n<b>New Role:</b> {custom_role}"
-                )
-        else:
-            await message.edit_text(f"Invalid scope. Use 'group' or 'topic'.")
+                save_group_config_field(group_key, "role_primary", custom_role)
+                save_topic_data_field(main_topic_id, "role_primary", None)
+                save_topic_data_field(main_topic_id, "role_active", custom_role)
+                save_topic_data_field(main_topic_id, "history", [])
+                
+                response = f"Primary role set successfully for group {group_id}!\n<b>New Role:</b> {custom_role}"
 
+        else:
+            thread_id_str = str(message.message_thread_id or 0)
+            topic_id = f"{group_id}:{thread_id_str}"
+            
+            full_role_text = scope_or_role_text + (" " + custom_role if custom_role else "")
+            
+            if not full_role_text:
+                save_topic_data_field(topic_id, "role_primary", None)
+                save_topic_data_field(topic_id, "role_active", None)
+                save_topic_data_field(topic_id, "history", [])
+                response = f"Primary role reset to group's role for topic {topic_id}."
+            else:
+                save_topic_data_field(topic_id, "role_primary", full_role_text)
+                save_topic_data_field(topic_id, "role_active", full_role_text)
+                save_topic_data_field(topic_id, "history", [])
+                response = f"Primary role set successfully for topic {topic_id}!\n<b>New Role:</b> {full_role_text}"
+        
+        await message.edit_text(response)
         await asyncio.sleep(1)
         await message.delete()
+
     except Exception as e:
-        await client.send_message(
-            "me", f"❌ An error occurred in the `grole` command:\n\n{str(e)}"
-        )
+        await client.send_message("me", f"❌ An error occurred in the `grole` command:\n\n{str(e)}")
 
 @Client.on_message(filters.command("grolex", prefix) & filters.group & filters.me)
 async def toggle_or_reset_secondary_role(client: Client, message: Message):
     try:
-        parts = message.text.strip().split()
-        if len(parts) < 2:
-            await message.edit_text(
-                f"Usage:\n"
-                f"{prefix}grolex group [custom secondary role|r]\n"
-                f"{prefix}grolex topic [thread_id] [custom secondary role|r]\n\n"
-                f"Use 'r' to reset the custom secondary role to the default secondary role."
-            )
-            return
-
-        scope = parts[1].lower()
+        parts = message.text.strip().split(maxsplit=2) 
         group_id = str(message.chat.id)
+        
+        arg1 = parts[1].strip() if len(parts) > 1 else "" 
+        arg2 = parts[2].strip() if len(parts) > 2 else "" 
 
-        # Helper to get the effective primary role (the one currently active when not in secondary mode)
-        def get_effective_primary_role(group_key, topic_key):
-            if topic_key:
-                # Custom topic role overrides group role, overrides default
-                return db.get(collection, f"custom_roles.{topic_key}") or group_roles.get(group_key) or default_bot_role
-            # For group, it is group role, overrides default
-            return group_roles.get(group_key) or default_bot_role
+        scope = "topic"
+        role_text = arg1 
+
+        if arg1.lower() == "group":
+            scope = "group"
+            role_text = arg2
+
+        def get_secondary_role_details(group_id, topic_id, role_text_from_command, is_group_scope):
             
-        # Helper to get the key for secondary role storage
-        def get_secondary_role_key(group_key, topic_key):
-            # Original logic used different keys for group vs topic secondary roles
-            if topic_key:
-                return f"custom_secondary_roles.{topic_key}"
-            # For group, it checks custom_secondary_roles.{message.chat.id}
-            return f"custom_secondary_roles.{group_key}"
+            if is_group_scope:
+                config_data = get_group_config(group_id)
+                custom_secondary = config_data.get("role_secondary")
+            else:
+                config_data = get_topic_data(topic_id)
+                custom_secondary = config_data.get("role_secondary")
+            
+            if role_text_from_command.lower() == "r":
+                return None, default_secondary_role, True
+            
+            elif role_text_from_command:
+                return role_text_from_command, role_text_from_command, False
+            
+            else:
+                final_secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
+                return final_secondary_role, final_secondary_role, False
 
-
-        # Group Scope
         if scope == "group":
             group_key = group_id
             topic_key = f"{group_id}:0"
-            secondary_db_key = get_secondary_role_key(group_key, None)
             
-            # Text parts: Check if they contain an instruction (r or custom role)
-            role_text = " ".join(parts[2:]).strip()
-            
-            if role_text.lower() == "r":
-                db.set(collection, secondary_db_key, None)
-                db.set(collection, f"custom_roles.{topic_key}", get_effective_primary_role(group_key, None)) # Switch back to Primary
-                db.set(collection, f"chat_history.{topic_key}", None)
-                response = f"✅ Secondary role reset to default for group {group_id}."
+            topic_data = get_topic_data(topic_key)
+            primary_role = get_effective_bot_role(group_key, topic_key)
 
+            secondary_role_to_save, secondary_role_content, is_reset = get_secondary_role_details(group_key, topic_key, role_text, True)
+
+            if is_reset:
+                save_group_config_field(group_key, "role_secondary", None)
+                save_topic_data_field(topic_key, "role_active", primary_role)
+                response = f"✅ Secondary role reset to default for group {group_id}. Switched back to Primary."
+            
             elif role_text:
-                db.set(collection, secondary_db_key, role_text)
-                db.set(collection, f"custom_roles.{topic_key}", role_text) # Activate Secondary Role
-                db.set(collection, f"chat_history.{topic_key}", None)
-                response = f"✅ Custom secondary role set and activated for group {group_id}!\n<b>New Secondary Role:</b> {role_text}"
+                save_group_config_field(group_key, "role_secondary", secondary_role_to_save)
+                save_topic_data_field(topic_key, "role_active", secondary_role_content)
+                response = f"✅ Custom secondary role set and activated for group {group_id}!\n<b>New Secondary Role:</b> {secondary_role_content}"
             
-            else: # Toggle
-                current_role = db.get(collection, f"custom_roles.{topic_key}") or get_effective_primary_role(group_key, None)
-                primary_role = get_effective_primary_role(group_key, None)
-                custom_secondary = db.get(collection, secondary_db_key)
-                secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
-
-                if current_role != secondary_role:
-                    db.set(collection, f"custom_roles.{topic_key}", secondary_role)
-                    response = f"✅ Switched group {group_id} to **Secondary Role**.\n<b>Role:</b> {secondary_role[:100]}..."
+            else:
+                current_active_role = topic_data.get("role_active") or primary_role
+                
+                if current_active_role == secondary_role_content:
+                    save_topic_data_field(topic_key, "role_active", primary_role)
+                    response = f"✅ Switched group {group_id} back to **Primary Role**."
                 else:
-                    db.set(collection, f"custom_roles.{topic_key}", primary_role)
-                    response = f"✅ Switched group {group_id} back to **Primary Role**.\n<b>Role:</b> {primary_role[:100]}..."
-                db.set(collection, f"chat_history.{topic_key}", None)
-        
-        # Topic Scope
+                    save_topic_data_field(topic_key, "role_active", secondary_role_content)
+                    response = f"✅ Switched group {group_id} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content[:100]}..."
+            
+            save_topic_data_field(topic_key, "history", [])
+
         elif scope == "topic":
             thread_id_str = str(message.message_thread_id or 0)
-            role_text_parts = parts[2:]
-            
-            if len(parts) >= 3 and parts[2].isdigit():
-                thread_id_str = parts[2]
-                role_text_parts = parts[3:]
-            
             topic_key = f"{group_id}:{thread_id_str}"
-            secondary_db_key = get_secondary_role_key(group_id, topic_key)
-
-            role_text = " ".join(role_text_parts).strip()
             
-            if role_text.lower() == "r":
-                db.set(collection, secondary_db_key, None)
-                primary_role_content = get_effective_primary_role(group_id, topic_key)
-                db.set(collection, f"custom_roles.{topic_key}", primary_role_content) # Switch back to Primary
-                db.set(collection, f"chat_history.{topic_key}", None)
-                response = f"✅ Secondary role reset to default for topic {topic_key}."
+            topic_data = get_topic_data(topic_key)
+            primary_role = get_effective_bot_role(group_id, topic_key) 
+
+            secondary_role_to_save, secondary_role_content, is_reset = get_secondary_role_details(group_id, topic_key, role_text, False)
+            
+            if is_reset:
+                save_topic_data_field(topic_key, "role_secondary", None)
+                save_topic_data_field(topic_key, "role_active", primary_role)
+                response = f"✅ Secondary role reset to default for topic {topic_key}. Switched back to Primary."
             
             elif role_text:
-                db.set(collection, secondary_db_key, role_text)
-                db.set(collection, f"custom_roles.{topic_key}", role_text) # Activate Secondary Role
-                db.set(collection, f"chat_history.{topic_key}", None)
-                response = f"✅ Custom secondary role set and activated for topic {topic_key}!\n<b>New Secondary Role:</b> {role_text}"
+                save_topic_data_field(topic_key, "role_secondary", secondary_role_to_save)
+                save_topic_data_field(topic_key, "role_active", secondary_role_content)
+                response = f"✅ Custom secondary role set and activated for topic {topic_key}!\n<b>New Secondary Role:</b> {secondary_role_content}"
             
-            else: # Toggle
-                current_role = db.get(collection, f"custom_roles.{topic_key}") or get_effective_primary_role(group_id, topic_key)
-                primary_role = get_effective_primary_role(group_id, topic_key)
-                custom_secondary = db.get(collection, secondary_db_key)
-                secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
-
-                if current_role != secondary_role:
-                    db.set(collection, f"custom_roles.{topic_key}", secondary_role)
-                    response = f"✅ Switched topic {topic_key} to **Secondary Role**.\n<b>Role:</b> {secondary_role[:100]}..."
+            else:
+                current_active_role = topic_data.get("role_active") or primary_role
+                
+                if current_active_role == secondary_role_content:
+                    save_topic_data_field(topic_key, "role_active", primary_role)
+                    response = f"✅ Switched topic {topic_key} back to **Primary Role**."
                 else:
-                    db.set(collection, f"custom_roles.{topic_key}", primary_role)
-                    response = f"✅ Switched topic {topic_key} back to **Primary Role**.\n<b>Role:</b> {primary_role[:100]}..."
-                db.set(collection, f"chat_history.{topic_key}", None)
+                    save_topic_data_field(topic_key, "role_active", secondary_role_content)
+                    response = f"✅ Switched topic {topic_key} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content[:100]}..."
+            
+            save_topic_data_field(topic_key, "history", [])
                 
         else:
-            response = "Invalid scope. Use 'group' or 'topic'."
+            response = "Invalid scope. Use 'group' or omit for topic."
 
         await message.edit_text(response)
         await asyncio.sleep(1)
         await message.delete()
 
     except Exception as e:
-        await client.send_message(
-            "me", f"❌ An error occurred in the `grolex` command:\n\n{str(e)}"
-        )
+        await client.send_message("me", f"❌ An error occurred in the `grolex` command:\n\n{str(e)}")
+
 
 @Client.on_message(filters.command("wchatel", prefix) & filters.me)
 async def toggle_elevenlabs(client: Client, message: Message):
     global elevenlabs_enabled
     try:
-        # Toggle the current setting
         elevenlabs_enabled = not elevenlabs_enabled
-        db.set(collection, "elevenlabs_enabled", elevenlabs_enabled)
+        save_global_config_field("elevenlabs_enabled", elevenlabs_enabled)
         
         status = "enabled" if elevenlabs_enabled else "disabled"
         await message.edit_text(f"🎙️ **ElevenLabs Voice Generation is now {status}** for groups.")
@@ -802,7 +827,7 @@ async def set_gemini_key(client: Client, message: Message):
         key_arg = command[2] if len(command) > 2 else None
 
         gemini_keys = get_gemini_keys()
-        current_key_index = db.get(collection, "current_key_index") or 0
+        current_key_index = get_global_config_field("key_index", 0)
 
         if subcommand == "add" and key_arg:
             if key_arg not in gemini_keys:
@@ -815,7 +840,7 @@ async def set_gemini_key(client: Client, message: Message):
         elif subcommand == "set" and key_arg:
             index = int(key_arg) - 1
             if 0 <= index < len(gemini_keys):
-                db.set(collection, "current_key_index", index)
+                save_global_config_field("key_index", index)
                 await message.edit_text(f"✅ Current Gemini API key index set to **{key_arg}**.")
             else:
                 await message.edit_text(f"❌ Invalid key index: {key_arg}.")
@@ -826,7 +851,7 @@ async def set_gemini_key(client: Client, message: Message):
                 gemini_keys.pop(index)
                 save_gemini_keys(gemini_keys)
                 if current_key_index >= len(gemini_keys):
-                    db.set(collection, "current_key_index", max(0, len(gemini_keys) - 1))
+                    save_global_config_field("key_index", max(0, len(gemini_keys) - 1))
                 await message.edit_text(f"✅ Gemini API key **{key_arg}** deleted successfully from the central list!")
             else:
                 await message.edit_text(f"❌ Invalid key index: {key_arg}.")
@@ -849,31 +874,27 @@ async def set_gemini_key(client: Client, message: Message):
             )
 
     except Exception as e:
-        await client.send_message(
-            "me", f"❌ An error occurred in the `setwkey` command:\n\n{str(e)}"
-        )
+        await client.send_message("me", f"❌ An error occurred in the `setwkey` command:\n\n{str(e)}")
 
 @Client.on_message(filters.command("setwmodel", prefix) & filters.me)
 async def set_wmodel(client: Client, message: Message):
+    global gmodel_name
     try:
-        # The model is stored in the custom.gchat collection as gmodel_name
-        model_collection = "custom.gchat"
         model_key = "gmodel_name"
         
         parts = message.text.strip().split()
         if len(parts) < 2:
-            current_model = db.get(model_collection, model_key) or "gemini-2.0-flash"
+            current_model = get_global_config_field(model_key) or "gemini-2.0-flash"
             await message.edit_text(
-                f"🤖 **Current Global Gemini Model:** `{current_model}`\n\n"
+                f"🤖 **Current WChat Gemini Model:** `{current_model}`\n\n"
                 f"**Usage:** `{prefix}setwmodel <model_name>`"
             )
             return
 
         new_model = parts[1].strip()
-        
-        # Save the model globally (in gchat's collection)
-        db.set(model_collection, model_key, new_model)
-        await message.edit_text(f"✅ **Global Gemini model set to:** `{new_model}`")
+        gmodel_name = new_model
+        save_global_config_field(model_key, new_model)
+        await message.edit_text(f"✅ **WChat Gemini model set to:** `{new_model}`")
 
     except Exception as e:
         await client.send_message("me", f"❌ Error in `setwmodel` command:\n\n{str(e)}")
@@ -884,15 +905,14 @@ modules_help["wchat"] = {
     "wchat del [thread_id]": "Delete the chat history for the current/specified topic.",
     "wchat all": "Toggle wchat for all topics in the current group.",
     "wchat history [num|off]": "Set a global history limit for all wchats.",
-    "grole group <custom role>": "Set a custom primary role for the bot for the current group and clear history.",
-    "grole topic <thread_id> <custom role>": "Set a custom primary role for the bot for a topic and clear history.",
-    "grolex group/topic": "Toggle the group/topic between its primary/secondary roles.",
-    "grolex group/topic <custom role>": "Set a custom secondary role for the group/topic.",
-    "grolex group/topic r": "Reset the custom secondary role to the default secondary role.",
-    "wchatel": "Toggle the ElevenLabs voice generation feature for groups (disabled by default).",
+    "grole group <custom role>": "Set a custom **primary role** for the entire group. Affects all topics by default.",
+    "grole <custom role>": "Set a custom **primary role** for the **current topic**.",
+    "grolex group [role|r]": "Toggle the **main topic** (thread 0) between primary/secondary roles. Use `[role]` to set a custom secondary role, or `r` to reset it.",
+    "grolex [role|r]": "Toggle the **current topic** between primary/secondary roles. Use `[role]` to set a custom secondary role, or `r` to reset it.",
+    "wchatel": "Toggle the ElevenLabs voice generation feature for groups.",
     "setwkey add <key>": "Add a new Gemini API key to the central list.",
     "setwkey set <index>": "Set the current Gemini API key by index.",
     "setwkey del <index>": "Delete a Gemini API key by index from the central list.",
     "setwkey": "Display all available Gemini API keys (partial) and the current key index.",
-    "setwmodel <model_name>": "Set the single Gemini model for the entire system."
+    "setwmodel <model_name>": "Set the Gemini model for the WChat module only."
 }
