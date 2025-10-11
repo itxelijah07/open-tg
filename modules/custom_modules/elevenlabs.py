@@ -98,7 +98,10 @@ async def generate_elevenlabs_audio(text: str):
     params = {key: db.get("custom.elevenlabs", key, DEFAULT_PARAMS[key]) for key in DEFAULT_PARAMS}
     
     for attempt in range(len(api_keys)):
-        api_key = api_keys[current_key_index]
+        # --- FIX APPLIED HERE: Extract the key string from the dictionary ---
+        api_key = api_keys[current_key_index]["key"] 
+        # --- END FIX ---
+        
         headers = {
             "xi-api-key": api_key,
             "Content-Type": "application/json",
