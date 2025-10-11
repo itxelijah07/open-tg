@@ -385,6 +385,24 @@ async def process_group_messages(client, message, topic_id, user_name):
         model_to_use = gmodel_name
         
         while group_message_queues[topic_id]:
+            
+            # --- START FIX: Critical Re-check for Enabled Status ---
+            group_id = topic_id.split(':')[0]
+            topic_data = get_topic_data(topic_id)
+            group_config = get_group_config(group_id)
+            
+            # Determine if WChat is disabled for this topic (either explicitly or globally/group-wide)
+            is_explicitly_disabled = topic_data.get("enabled") is False
+            is_not_enabled_by_group = topic_data.get("enabled") is not True and not group_config.get("enabled_all", False)
+            
+            if is_explicitly_disabled or is_not_enabled_by_group:
+                # WChat is disabled. Stop processing the queue and ensure the DB queue is empty.
+                group_message_queues[topic_id].clear()
+                clear_group_message_queue(topic_id)
+                active_topics.discard(topic_id)
+                return 
+            # --- END FIX ---
+            
             delay = random.choice([4, 6, 8])
             await asyncio.sleep(delay)
 
@@ -408,6 +426,7 @@ async def process_group_messages(client, message, topic_id, user_name):
             max_length = 200
 
             try:
+                # Assuming _call_gemini_api is available
                 bot_response = await _call_gemini_api(client, full_prompt, topic_id, model_to_use, chat_history_list)
                 
                 if len(bot_response) > max_length:
@@ -433,6 +452,7 @@ async def process_group_messages(client, message, topic_id, user_name):
                     f"❌ Invalid or empty bot_response for topic {topic_id}. Using fallback response."
                 )
 
+            # Assuming handle_voice_message is available
             if await handle_voice_message(client, message.chat.id, bot_response, message.message_thread_id):
                 continue
 
@@ -455,7 +475,7 @@ async def process_group_messages(client, message, topic_id, user_name):
         active_topics.discard(topic_id)
     except Exception as e:
         await client.send_message("me", f"❌ Critical error in `process_group_messages` for topic {topic_id}: {str(e)}")
-        active_topics.discard(topic_id) 
+        active_topics.discard(topic_id)
 
 
 @Client.on_message(filters.group & ~filters.me, group=2)
