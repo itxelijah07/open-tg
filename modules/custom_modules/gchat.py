@@ -279,9 +279,28 @@ async def gchat(client: Client, message: Message):
 
 async def process_messages(client, message, user_id, user_name):
     try:
+        global global_role_state, gchat_for_all # Ensure we can access global flags
+        
+        # Load state inside the loop just in case it changed due to another task/thread
         global_role_state = db.get(collection, "global_default_role_state") or "primary"
 
         while user_message_queues[user_id]:
+            
+            # --- START FIX: Critical Re-check for Enabled Status ---
+            
+            # Re-fetch global/user-specific enabled status inside the loop
+            global gchat_for_all, enabled_users, disabled_users
+            is_disabled = user_id in disabled_users
+            is_not_enabled = not gchat_for_all and user_id not in enabled_users
+
+            if is_disabled or is_not_enabled:
+                # WChat is disabled for this user. Clear the queue (memory & DB) and stop.
+                user_message_queues[user_id].clear()
+                clear_user_message_queue(user_id)
+                active_users.discard(user_id)
+                return 
+            # --- END FIX ---
+            
             delay = random.choice([6, 10, 12])
             await asyncio.sleep(delay)
 
@@ -296,6 +315,7 @@ async def process_messages(client, message, user_id, user_name):
             combined_message = " ".join(batch)
             clear_user_message_queue(user_id)
             
+            # --- Role Logic (Unchanged) ---
             user_specific_state = db.get(collection, f"current_role_key.{user_id}")
             active_state_for_user = user_specific_state or global_role_state
             
@@ -308,6 +328,7 @@ async def process_messages(client, message, user_id, user_name):
                 bot_role_content = user_primary_role or default_bot_role
 
             model_to_use = gmodel_name
+            # -----------------------------
             
             chat_history_list = get_chat_history(user_id, bot_role_content, combined_message, user_name)
             global_history_limit = db.get(collection, "history_limit")
