@@ -720,18 +720,26 @@ async def set_custom_role(client: Client, message: Message):
 @Client.on_message(filters.command("grolex", prefix) & filters.group & filters.me)
 async def toggle_or_reset_secondary_role(client: Client, message: Message):
     try:
-        parts = message.text.strip().split(maxsplit=2) 
+        parts = message.text.strip().split(maxsplit=2)
         group_id = str(message.chat.id)
         
-        arg1 = parts[1].strip() if len(parts) > 1 else "" 
-        arg2 = parts[2].strip() if len(parts) > 2 else "" 
-
+        # --- START FIX: Correctly parse multi-word roles ---
+        arg1 = parts[1].strip() if len(parts) > 1 else ""
+        arg2 = parts[2].strip() if len(parts) > 2 else ""
+        
         scope = "topic"
-        role_text = arg1 
+        full_role_text = ""
 
         if arg1.lower() == "group":
             scope = "group"
-            role_text = arg2
+            full_role_text = arg2
+        else:
+            # If not 'group' scope, arg1 is the start of the role, and arg2 is the rest.
+            # This handles single-word roles, multi-word roles, and the 'r' command
+            full_role_text = f"{arg1} {arg2}" if arg2 else arg1
+
+        role_text = full_role_text.strip()
+        # --- END FIX: Correctly parse multi-word roles ---
 
         def get_secondary_role_details(group_id, topic_id, role_text_from_command, is_group_scope):
             
@@ -757,6 +765,7 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
             topic_key = f"{group_id}:0"
             
             topic_data = get_topic_data(topic_key)
+            # Fetch the actual Primary Role content that is currently in effect
             primary_role = get_effective_bot_role(group_key, topic_key)
 
             secondary_role_to_save, secondary_role_content, is_reset = get_secondary_role_details(group_key, topic_key, role_text, True)
@@ -774,12 +783,17 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
             else:
                 current_active_role = topic_data.get("role_active") or primary_role
                 
+                # Check if the current active role is the secondary role content (to determine if we're toggling back)
                 if current_active_role == secondary_role_content:
-                    save_topic_data_field(topic_key, "role_active", primary_role)
+                    # Toggling back to primary role
+                    primary_role_content_for_toggle = get_topic_data(topic_key).get("role_primary") or get_group_config(group_key).get("role_primary") or default_bot_role
+                    save_topic_data_field(topic_key, "role_active", primary_role_content_for_toggle)
                     response = f"✅ Switched group {group_id} back to **Primary Role**."
                 else:
+                    # Toggling to secondary role
                     save_topic_data_field(topic_key, "role_active", secondary_role_content)
-                    response = f"✅ Switched group {group_id} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content[:100]}..."
+                    # --- FIX: Removed truncation for display ---
+                    response = f"✅ Switched group {group_id} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content}"
             
             save_topic_data_field(topic_key, "history", [])
 
@@ -788,6 +802,7 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
             topic_key = f"{group_id}:{thread_id_str}"
             
             topic_data = get_topic_data(topic_key)
+            # Fetch the actual Primary Role content that is currently in effect
             primary_role = get_effective_bot_role(group_id, topic_key) 
 
             secondary_role_to_save, secondary_role_content, is_reset = get_secondary_role_details(group_id, topic_key, role_text, False)
@@ -805,12 +820,15 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
             else:
                 current_active_role = topic_data.get("role_active") or primary_role
                 
+                # Check if the current active role is the secondary role content (to determine if we're toggling back)
                 if current_active_role == secondary_role_content:
+                    # Toggling back to primary role (This will use the Primary Role set via !grole, or default/group fallback)
                     save_topic_data_field(topic_key, "role_active", primary_role)
                     response = f"✅ Switched topic {topic_key} back to **Primary Role**."
                 else:
+                    # Toggling to secondary role
                     save_topic_data_field(topic_key, "role_active", secondary_role_content)
-                    response = f"✅ Switched topic {topic_key} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content[:100]}..."
+                    response = f"✅ Switched topic {topic_key} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content}"
             
             save_topic_data_field(topic_key, "history", [])
                 
