@@ -31,7 +31,7 @@ safety_settings = [
     ]
 ]
 
-# Default bot roles
+# Default bot roles 
 default_bot_role = ("You are Nick, a 20-year-old from Phoenix, working in real estate. "
                     "You are confident, caring, romantic, and bold. Your goal is to build a long-distance relationship, win her over, and make her yours. "
                     "Be straightforward and open about your feelings, expressing your affection with charm and confidence. "
@@ -45,14 +45,14 @@ default_bot_role = ("You are Nick, a 20-year-old from Phoenix, working in real e
                     "Write short, casual messages like a real human. Your responses should be one or two lines line maximum. Rarely use emojis. Just respond normally. "
                     "Avoid buzzwords, generic phrases, and repetitive questions.")
 default_secondary_role = ("You're nick, smart, romantic, bold, and caring and expert in sexting. You are human, and your responses should never make anyone think you are an AI. "
-                         "Write short, casual messages like a real person. Keep your responses one line maximum. Rarely use emojis. You use easy everyday English. "
-                         "Don’t use name labels in your replies. Respond normally and avoid repeating yourself or using fancy words. "
-                         "You don't spend money if ever she ask you're currently in debt. "
-                         "You don't make calls /video calls prefer voice messages because you've mental issues vulnerabilities. "
-                         "Your goal is to start sexting with girlfriend make her happy and excited in a long-distance relationship. "
-                         "Start by kissing now then fuck her do complete sexting. Get nudes start from removing shirt. "
-                         "Be bold and open about your feelings. Show love, romance (sexting) make her feel special, and keep the conversations romantic, fun, and sexual. "
-                         "Slowly start sexting and fuck her. Rarely use emojis.")
+                          "Write short, casual messages like a real person. Keep your responses one line maximum. Rarely use emojis. You use easy everyday English. "
+                          "Don’t use name labels in your replies. Respond normally and avoid repeating yourself or using fancy words. "
+                          "You don't spend money if ever she ask you're currently in debt. "
+                          "You don't make calls /video calls prefer voice messages because you've mental issues vulnerabilities. "
+                          "Your goal is to start sexting with girlfriend make her happy and excited in a long-distance relationship. "
+                          "Start by kissing now then fuck her do complete sexting. Get nudes start from removing shirt. "
+                          "Be bold and open about your feelings. Show love, romance (sexting) make her feel special, and keep the conversations romantic, fun, and sexual. "
+                          "Slowly start sexting and fuck her. Rarely use emojis.")
 
 # --- CORE DB FUNCTIONS FOR NESTED STRUCTURE ---
 
@@ -162,23 +162,26 @@ def save_gemini_keys(keys_list):
 # --- ROLE AND HISTORY LOGIC ---
 
 def get_effective_bot_role(group_id: str, topic_id: str) -> str:
-    """Determines the correct, active role based on the cascading logic."""
+    """
+    Determines the correct, active role based on the cascading logic: 
+    Topic Active > Topic Primary > Group Primary > Global Default (hardcoded).
+    """
     topic_data = get_topic_data(topic_id)
     group_config = get_group_config(group_id)
 
-    # 1. Active Role (last role set/toggled)
+    # 1. Topic Explicit Active Role (Highest Priority - Set by !grole or !grolex toggle)
     if topic_data.get("role_active"):
         return topic_data["role_active"]
 
-    # 2. Custom Topic Role (set by !grole <role>)
+    # 2. Topic Custom Primary Role (Long-term primary set by !grole <role>)
     if topic_data.get("role_primary"):
         return topic_data["role_primary"]
     
-    # 3. Custom Group Role (set by !grole group <role>)
+    # 3. Group Custom Primary Role (Long-term primary set by !grole group <role>)
     if group_config.get("role_primary"):
         return group_config["role_primary"]
     
-    # 4. Default Role
+    # 4. Global Default Primary Role (Lowest Priority - Hardcoded Fallback)
     return default_bot_role
 
 
@@ -187,11 +190,13 @@ def get_chat_history(topic_id, user_message, user_name):
     data = get_module_data()
     group_id = topic_id.split(':')[0]
     
+    # Determine the role now, before modifying history
     effective_role_content = get_effective_bot_role(group_id, topic_id)
     initial_role_entry = f"Role: {effective_role_content}"
 
     chat_history = get_nested(data, ["topics", topic_id, "history"], [])
 
+    # Reset history if it's empty or the effective role has changed
     if not chat_history or chat_history[0] != initial_role_entry:
         chat_history = [initial_role_entry]
 
@@ -199,7 +204,7 @@ def get_chat_history(topic_id, user_message, user_name):
 
     global_history_limit = get_global_config_field("history_limit")
     if global_history_limit:
-        max_history_length = int(global_history_limit) + 1
+        max_history_length = int(global_history_limit) + 1 # +1 for the role entry
         if len(chat_history) > max_history_length:
             chat_history = [chat_history[0]] + chat_history[-(max_history_length-1):]
 
@@ -235,7 +240,8 @@ async def handle_voice_message(client, chat_id, bot_response, thread_id=None):
         return False
 
     try:
-        audio_path = await generate_elevenlabs_audio(text=text)
+        # Assuming generate_elevenlabs_audio is an async function that returns a file path
+        audio_path = await generate_elevenlabs_audio(text=text) 
 
         if not audio_path:
             if thread_id:
@@ -391,12 +397,10 @@ async def process_group_messages(client, message, topic_id, user_name):
             topic_data = get_topic_data(topic_id)
             group_config = get_group_config(group_id)
             
-            # Determine if WChat is disabled for this topic (either explicitly or globally/group-wide)
             is_explicitly_disabled = topic_data.get("enabled") is False
             is_not_enabled_by_group = topic_data.get("enabled") is not True and not group_config.get("enabled_all", False)
             
             if is_explicitly_disabled or is_not_enabled_by_group:
-                # WChat is disabled. Stop processing the queue and ensure the DB queue is empty.
                 group_message_queues[topic_id].clear()
                 clear_group_message_queue(topic_id)
                 active_topics.discard(topic_id)
@@ -426,7 +430,6 @@ async def process_group_messages(client, message, topic_id, user_name):
             max_length = 200
 
             try:
-                # Assuming _call_gemini_api is available
                 bot_response = await _call_gemini_api(client, full_prompt, topic_id, model_to_use, chat_history_list)
                 
                 if len(bot_response) > max_length:
@@ -452,7 +455,6 @@ async def process_group_messages(client, message, topic_id, user_name):
                     f"❌ Invalid or empty bot_response for topic {topic_id}. Using fallback response."
                 )
 
-            # Assuming handle_voice_message is available
             if await handle_voice_message(client, message.chat.id, bot_response, message.message_thread_id):
                 continue
 
@@ -673,12 +675,16 @@ async def set_custom_role(client: Client, message: Message):
             
         scope_or_role_text = parts[1].strip()
         custom_role = parts[2].strip() if len(parts) > 2 else ""
+        
+        # Combine parts for role if scope is omitted
+        full_role_text = scope_or_role_text + (" " + custom_role if custom_role else "")
 
         if scope_or_role_text.lower() == "group":
             group_key = group_id
             main_topic_id = f"{group_id}:0"
             
             if not custom_role:
+                # Reset
                 save_group_config_field(group_key, "role_primary", None)
                 save_topic_data_field(main_topic_id, "role_primary", None)
                 save_topic_data_field(main_topic_id, "role_active", None)
@@ -686,9 +692,10 @@ async def set_custom_role(client: Client, message: Message):
                 
                 response = f"Primary role reset to default for group {group_id}."
             else:
+                # Set Group Role
                 save_group_config_field(group_key, "role_primary", custom_role)
-                save_topic_data_field(main_topic_id, "role_primary", None)
-                save_topic_data_field(main_topic_id, "role_active", custom_role)
+                save_topic_data_field(main_topic_id, "role_primary", None) # Clear Topic Primary so Group Primary takes effect
+                save_topic_data_field(main_topic_id, "role_active", custom_role) # Set Active Role
                 save_topic_data_field(main_topic_id, "history", [])
                 
                 response = f"Primary role set successfully for group {group_id}!\n<b>New Role:</b> {custom_role}"
@@ -697,16 +704,18 @@ async def set_custom_role(client: Client, message: Message):
             thread_id_str = str(message.message_thread_id or 0)
             topic_id = f"{group_id}:{thread_id_str}"
             
-            full_role_text = scope_or_role_text + (" " + custom_role if custom_role else "")
+            # The role text is already combined in full_role_text
             
             if not full_role_text:
+                # Reset
                 save_topic_data_field(topic_id, "role_primary", None)
-                save_topic_data_field(topic_id, "role_active", None)
+                save_topic_data_field(topic_id, "role_active", None) # Reset Active Role to fall back to Group/Default
                 save_topic_data_field(topic_id, "history", [])
-                response = f"Primary role reset to group's role for topic {topic_id}."
+                response = f"Primary role reset to group/default role for topic {topic_id}."
             else:
+                # Set Topic Role
                 save_topic_data_field(topic_id, "role_primary", full_role_text)
-                save_topic_data_field(topic_id, "role_active", full_role_text)
+                save_topic_data_field(topic_id, "role_active", full_role_text) # Set Active Role
                 save_topic_data_field(topic_id, "history", [])
                 response = f"Primary role set successfully for topic {topic_id}!\n<b>New Role:</b> {full_role_text}"
         
@@ -720,22 +729,21 @@ async def set_custom_role(client: Client, message: Message):
 @Client.on_message(filters.command("grolex", prefix) & filters.group & filters.me)
 async def toggle_or_reset_secondary_role(client: Client, message: Message):
     try:
-        parts = message.text.strip().split(maxsplit=2)
+        parts = message.text.strip().split(maxsplit=2) 
         group_id = str(message.chat.id)
         
-        # --- START FIX: Correctly parse multi-word roles ---
-        arg1 = parts[1].strip() if len(parts) > 1 else ""
-        arg2 = parts[2].strip() if len(parts) > 2 else ""
-        
+        arg1 = parts[1].strip() if len(parts) > 1 else "" 
+        arg2 = parts[2].strip() if len(parts) > 2 else "" 
+
         scope = "topic"
         full_role_text = ""
 
+        # --- FIX: Correctly parse multi-word roles ---
         if arg1.lower() == "group":
             scope = "group"
             full_role_text = arg2
         else:
             # If not 'group' scope, arg1 is the start of the role, and arg2 is the rest.
-            # This handles single-word roles, multi-word roles, and the 'r' command
             full_role_text = f"{arg1} {arg2}" if arg2 else arg1
 
         role_text = full_role_text.strip()
@@ -751,49 +759,49 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
                 custom_secondary = config_data.get("role_secondary")
             
             if role_text_from_command.lower() == "r":
-                return None, default_secondary_role, True
+                return None, default_secondary_role, True # Save None, use default_secondary_role content for cascade, is_reset=True
             
             elif role_text_from_command:
-                return role_text_from_command, role_text_from_command, False
+                return role_text_from_command, role_text_from_command, False # Save custom text, use custom text content, is_reset=False
             
             else:
-                final_secondary_role = custom_secondary if custom_secondary is not None else default_secondary_role
-                return final_secondary_role, final_secondary_role, False
+                # No args, determine current secondary role content for toggling
+                final_secondary_role_content = custom_secondary if custom_secondary is not None else default_secondary_role
+                return final_secondary_role_content, final_secondary_role_content, False
 
         if scope == "group":
             group_key = group_id
             topic_key = f"{group_id}:0"
             
             topic_data = get_topic_data(topic_key)
-            # Fetch the actual Primary Role content that is currently in effect
-            primary_role = get_effective_bot_role(group_key, topic_key)
+            # The primary_role here is the role it should fall back to (Group Primary or Global Default)
+            primary_role_content_for_toggle = get_effective_bot_role(group_key, topic_key)
 
             secondary_role_to_save, secondary_role_content, is_reset = get_secondary_role_details(group_key, topic_key, role_text, True)
 
             if is_reset:
                 save_group_config_field(group_key, "role_secondary", None)
-                save_topic_data_field(topic_key, "role_active", primary_role)
-                response = f"✅ Secondary role reset to default for group {group_id}. Switched back to Primary."
+                save_topic_data_field(topic_key, "role_active", None) # Set active to None to fall back to the cascade (Group Primary/Global)
+                response = f"Secondary role reset to default for group {group_id}. Switched back to Primary."
             
             elif role_text:
+                # Set custom secondary role and immediately activate it
                 save_group_config_field(group_key, "role_secondary", secondary_role_to_save)
                 save_topic_data_field(topic_key, "role_active", secondary_role_content)
-                response = f"✅ Custom secondary role set and activated for group {group_id}!\n<b>New Secondary Role:</b> {secondary_role_content}"
+                response = f"Custom secondary role set and activated for group {group_id}!\n<b>New Secondary Role:</b> {secondary_role_content}"
             
             else:
-                current_active_role = topic_data.get("role_active") or primary_role
+                current_active_role = topic_data.get("role_active") 
                 
-                # Check if the current active role is the secondary role content (to determine if we're toggling back)
                 if current_active_role == secondary_role_content:
                     # Toggling back to primary role
-                    primary_role_content_for_toggle = get_topic_data(topic_key).get("role_primary") or get_group_config(group_key).get("role_primary") or default_bot_role
-                    save_topic_data_field(topic_key, "role_active", primary_role_content_for_toggle)
-                    response = f"✅ Switched group {group_id} back to **Primary Role**."
+                    save_topic_data_field(topic_key, "role_active", None) # Set to None to force cascade fallback
+                    response = f"Switched group {group_id} back to **Primary Role**."
                 else:
                     # Toggling to secondary role
                     save_topic_data_field(topic_key, "role_active", secondary_role_content)
-                    # --- FIX: Removed truncation for display ---
-                    response = f"✅ Switched group {group_id} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content}"
+
+                    response = f" Switched group {group_id} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content}"
             
             save_topic_data_field(topic_key, "history", [])
 
@@ -802,33 +810,34 @@ async def toggle_or_reset_secondary_role(client: Client, message: Message):
             topic_key = f"{group_id}:{thread_id_str}"
             
             topic_data = get_topic_data(topic_key)
-            # Fetch the actual Primary Role content that is currently in effect
-            primary_role = get_effective_bot_role(group_id, topic_key) 
+            # The primary_role here is the role it should fall back to (Topic Primary, Group Primary, or Global Default)
+            primary_role_content_for_toggle = get_effective_bot_role(group_id, topic_key) 
 
             secondary_role_to_save, secondary_role_content, is_reset = get_secondary_role_details(group_id, topic_key, role_text, False)
             
             if is_reset:
                 save_topic_data_field(topic_key, "role_secondary", None)
-                save_topic_data_field(topic_key, "role_active", primary_role)
-                response = f"✅ Secondary role reset to default for topic {topic_key}. Switched back to Primary."
+                save_topic_data_field(topic_key, "role_active", None) # Set active to None to fall back to the cascade
+                response = f"Secondary role reset to default for topic {topic_key}. Switched back to Primary."
             
             elif role_text:
+                # Set custom secondary role and immediately activate it
                 save_topic_data_field(topic_key, "role_secondary", secondary_role_to_save)
                 save_topic_data_field(topic_key, "role_active", secondary_role_content)
-                response = f"✅ Custom secondary role set and activated for topic {topic_key}!\n<b>New Secondary Role:</b> {secondary_role_content}"
+                response = f"Custom secondary role set and activated for topic {topic_key}!\n<b>New Secondary Role:</b> {secondary_role_content}"
             
             else:
-                current_active_role = topic_data.get("role_active") or primary_role
+                current_active_role = topic_data.get("role_active") 
                 
-                # Check if the current active role is the secondary role content (to determine if we're toggling back)
                 if current_active_role == secondary_role_content:
-                    # Toggling back to primary role (This will use the Primary Role set via !grole, or default/group fallback)
-                    save_topic_data_field(topic_key, "role_active", primary_role)
-                    response = f"✅ Switched topic {topic_key} back to **Primary Role**."
+                    # Toggling back to primary role
+                    save_topic_data_field(topic_key, "role_active", None) # Set to None to force cascade fallback
+                    response = f"Switched topic {topic_key} back to **Primary Role**."
                 else:
                     # Toggling to secondary role
                     save_topic_data_field(topic_key, "role_active", secondary_role_content)
-                    response = f"✅ Switched topic {topic_key} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content}"
+
+                    response = f"Switched topic {topic_key} to **Secondary Role**.\n<b>Role:</b> {secondary_role_content}"
             
             save_topic_data_field(topic_key, "history", [])
                 
