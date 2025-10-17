@@ -87,15 +87,24 @@ async def should_forward_filter(_, __, message):
     chat_id = str(message.chat.id)
     sources = get_source_chats()
 
-    return chat_id in sources
+    is_source = chat_id in sources
+
+    if is_source:
+        if message.text and message.text.startswith(prefix):
+            return False
+
+    return is_source
 
 
 forward_filter = filters.create(should_forward_filter)
 
 
-@Client.on_message(forward_filter & ~filters.me)
+@Client.on_message(forward_filter)
 async def auto_forward_messages(client: Client, message: Message):
     try:
+        if message.outgoing and message.text and message.text.startswith(prefix):
+            raise ContinuePropagation
+
         target = get_target_chat()
         if not target:
             raise ContinuePropagation
