@@ -20,18 +20,24 @@ from pyrogram import Client
 
 from utils import config
 
-common_params = {
-    "api_id": config.api_id,
-    "api_hash": config.api_hash,
-    "hide_password": True,
-    "test_mode": config.test_server,
-}
-
 if __name__ == "__main__":
-    if config.STRINGSESSION:
-        common_params["session_string"] = config.STRINGSESSION
+    if not config.STRINGSESSION:
+        raise RuntimeError(
+            "STRINGSESSION is required! Please set it in your .env file.\n"
+            "Generate one using: python string_gen.py"
+        )
 
-    app = Client("my_account", **common_params)
+    common_params = {
+        "api_id": config.api_id,
+        "api_hash": config.api_hash,
+        "session_string": config.STRINGSESSION,
+        "name": ":memory:",
+        "hide_password": True,
+        "test_mode": config.test_server,
+        "in_memory": True,
+    }
+
+    app = Client(**common_params)
 
     if config.db_type in ["mongo", "mongodb"]:
         from pymongo import MongoClient, errors

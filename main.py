@@ -43,9 +43,7 @@
 import os
 import logging
 
-import sqlite3
 import platform
-import subprocess
 
 from pyrogram import Client, idle, errors
 from pyrogram.enums.parse_mode import ParseMode
@@ -63,9 +61,17 @@ SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 if SCRIPT_PATH != os.getcwd():
     os.chdir(SCRIPT_PATH)
 
+if not config.STRINGSESSION:
+    raise RuntimeError(
+        "STRINGSESSION is required! Please set it in your .env file.\n"
+        "Generate one using: python string_gen.py"
+    )
+
 common_params = {
     "api_id": config.api_id,
     "api_hash": config.api_hash,
+    "session_string": config.STRINGSESSION,
+    "name": ":memory:",
     "hide_password": True,
     "workdir": SCRIPT_PATH,
     "app_version": userbot_version,
@@ -74,12 +80,10 @@ common_params = {
     "sleep_threshold": 30,
     "test_mode": config.test_server,
     "parse_mode": ParseMode.HTML,
+    "in_memory": True,
 }
 
-if config.STRINGSESSION:
-    common_params["session_string"] = config.STRINGSESSION
-
-app = Client("my_account", **common_params)
+app = Client(**common_params)
 
 
 def load_missing_modules():
@@ -124,22 +128,14 @@ async def main():
 
     try:
         await app.start()
-    except sqlite3.OperationalError as e:
-        if str(e) == "database is locked" and os.name == "posix":
-            logging.warning(
-                "Session file is locked. Trying to kill blocking process..."
-            )
-            subprocess.run(["fuser", "-k", "my_account.session"], check=True)
-            restart()
-        raise
     except (errors.NotAcceptable, errors.Unauthorized) as e:
         logging.error(
-            "%s: %s\nMoving session file to my_account.session-old...",
+            "%s: %s\nYour string session is invalid or expired!\n"
+            "Please generate a new one using: python string_gen.py",
             e.__class__.__name__,
             e,
         )
-        os.rename("./my_account.session", "./my_account.session-old")
-        restart()
+        raise
 
     load_missing_modules()
     module_manager = ModuleManager.get_instance()
